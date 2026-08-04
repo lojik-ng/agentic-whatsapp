@@ -1,6 +1,6 @@
-node_modules
-data
-whatsapp-data
+node_modules/
+data/
+whatsapp-data/
 .env
 *.log
 *.db
