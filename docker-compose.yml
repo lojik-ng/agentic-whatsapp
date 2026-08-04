@@ -1,0 +1,29 @@
+services:
+  whatsapp:
+    container_name: agentic-whatsapp
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agentic-whatsapp:latest
+    restart: always
+    ports:
+      - "3056:3056"
+    environment:
+      - PORT=3056
+      - DATA_DIR=/usr/src/app/data
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+      - NODE_ENV=production
+    env_file:
+      - .env
+    volumes:
+      - ./whatsapp-data:/usr/src/app/data
+    # Recent Docker images of chromium-based clients need a few capabilities & shm size
+    shm_size: '1gb'
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+

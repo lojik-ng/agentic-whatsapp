@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>agentic-whatsapp — Authentication</title>
+  <meta http-equiv="refresh" content="2" id="meta-refresh" />
+  <style>
+    :root {
+      --bg: #0e1116;
+      --panel: #161b22;
+      --panel-border: #2a3038;
+      --accent: #25d366;
+      --accent-dim: #1ea355;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --danger: #f85149;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: radial-gradient(ellipse at top, #1b2330 0%, var(--bg) 60%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 540px;
+      margin: 64px auto;
+      padding: 0 24px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+
+    .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      font-size: 22px;
+      letter-spacing: 0.2px;
+    }
+
+    .logo .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 14px var(--accent);
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      padding: 28px 28px 32px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--panel-border);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .status-pill .indicator {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: pulse 1.4s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.3); }
+    }
+
+    h1 {
+      font-size: 20px;
+      margin: 14px 0 6px;
+      line-height: 1.3;
+    }
+
+    p.lead {
+      margin: 0 0 24px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .qr-area {
+      background: #ffffff;
+      border-radius: 10px;
+      padding: 20px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 280px;
+    }
+
+    .qr-area img {
+      width: 240px;
+      height: 240px;
+      image-rendering: pixelated;
+      display: block;
+    }
+
+    .qr-area.empty {
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    .ready-banner {
+      background: rgba(37, 211, 102, 0.12);
+      border: 1px solid rgba(37, 211, 102, 0.35);
+      color: var(--accent);
+      padding: 18px;
+      border-radius: 10px;
+      text-align: center;
+      font-weight: 600;
+      font-size: 16px;
+    }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 24px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    ol.steps {
+      margin: 0 0 24px;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    ol.steps li {
+      margin-bottom: 6px;
+    }
+
+    code.inline {
+      background: rgba(255, 255, 255, 0.06);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-family: "SF Mono", Monaco, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .error-banner {
+      background: rgba(248, 81, 73, 0.12);
+      border: 1px solid rgba(248, 81, 73, 0.35);
+      color: var(--danger);
+      padding: 16px;
+      border-radius: 10px;
+      text-align: center;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <span class="dot"></span>
+        <span>agentic-whatsapp</span>
+      </div>
+    </header>
+
+    <div class="panel">
+      <div id="status-row" style="margin-bottom: 16px;">
+        <span id="status-pill" class="status-pill">
+          <span class="indicator"></span>
+          <span id="status-text">Initializing…</span>
+        </span>
+      </div>
+
+      <div id="content">Loading…</div>
+
+      <div class="footer">
+        <span id="last-updated">Auto-refresh every 2s</span>
+        <a href="/status" target="_blank">JSON status →</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let lastQrSignature = null;
+
+    async function refreshStatus() {
+      try {
+        const res = await fetch('/status', { cache: 'no-store' });
+        const data = await res.json();
+        const pill = document.getElementById('status-text');
+        const content = document.getElementById('content');
+
+        pill.textContent = data.status;
+
+        if (data.status === 'READY') {
+          pill.style.color = '#25d366';
+          content.innerHTML = `
+            <div class="ready-banner">
+              ✓ Connected — WhatsApp client is ready
+            </div>
+            <p class="lead" style="margin-top:16px;text-align:center;">
+              You can close this window. The session is saved and the API is live.
+            </p>
+          `;
+          lastQrSignature = null;
+          document.getElementById('meta-refresh')?.remove();
+          return;
+        }
+
+        if (data.status === 'AUTH_FAILURE') {
+          pill.style.color = '#f85149';
+          content.innerHTML = `
+            <div class="error-banner">
+              ✗ Authentication failure — restart the container to retry
+            </div>
+          `;
+          return;
+        }
+
+        if (data.hasQr) {
+          pill.style.color = '#e6edf3';
+          // Build an absolute URL to /qr/<key>/image.png using the page's own URL,
+          // so the browser doesn't try to resolve a relative path against the current
+          // location (which would replace the last segment and 404).
+          const apiKey = location.pathname.replace(/^\/qr\//, '').replace(/\/$/, '');
+          const qrUrl = `/qr/${encodeURIComponent(apiKey)}/image.png?ts=${Date.now()}`;
+
+          content.innerHTML = `
+            <h1>Scan this QR code with WhatsApp</h1>
+            <p class="lead">Open WhatsApp on your phone → Settings → Linked Devices → Link a Device.</p>
+            <div class="qr-area" id="qr-area">
+              <span style="color:#888;">Loading QR…</span>
+            </div>
+            <ol class="steps" style="margin-top:24px;">
+              <li>Open <strong>WhatsApp</strong> on your phone.</li>
+              <li>Tap <strong>Settings</strong> → <strong>Linked Devices</strong> → <strong>Link a Device</strong>.</li>
+              <li>Point your phone camera at this QR code.</li>
+              <li>This page will refresh automatically once authentication completes.</li>
+            </ol>
+          `;
+
+          // Fetch the PNG as a blob and attach via object URL — survives any URL
+          // resolution oddities and avoids the broken relative-path issue.
+          fetch(qrUrl, { cache: 'no-store' })
+            .then((r) => {
+              if (!r.ok) throw new Error('QR not available');
+              return r.blob();
+            })
+            .then((blob) => {
+              const img = document.createElement('img');
+              img.alt = 'QR code';
+              img.src = URL.createObjectURL(blob);
+              const area = document.getElementById('qr-area');
+              if (area) {
+                area.innerHTML = '';
+                area.appendChild(img);
+              }
+            })
+            .catch(() => {
+              const area = document.getElementById('qr-area');
+              if (area) area.innerHTML = '<span style="color:#aaa;">QR not yet available, retrying…</span>';
+            });
+        } else if (data.status === 'AUTHENTICATED' || data.status === 'INITIALIZING') {
+          pill.style.color = '#e6edf3';
+          content.innerHTML = `
+            <h1>Preparing a fresh QR code…</h1>
+            <div class="qr-area empty">
+              <span>Waiting for QR…</span>
+            </div>
+            <p class="lead" style="margin-top:16px;text-align:center;">
+              The QR code appears within a few seconds of container startup.
+            </p>
+          `;
+        } else if (data.status === 'DISCONNECTED') {
+          pill.style.color = '#f85149';
+          content.innerHTML = `
+            <div class="error-banner">
+              Disconnected from WhatsApp — restart the container to reconnect
+            </div>
+          `;
+        }
+
+        document.getElementById('last-updated').textContent =
+          'Updated ' + new Date().toLocaleTimeString();
+      } catch (err) {
+        const content = document.getElementById('content');
+        content.innerHTML = `
+          <div class="error-banner">Network error — could not reach /status</div>
+        `;
+      }
+    }
+
+    refreshStatus();
+    setInterval(refreshStatus, 2000);
+  </script>
+</body>
+</html>
