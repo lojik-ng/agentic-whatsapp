@@ -484,7 +484,9 @@ async function getMessageById(id) {
  */
 async function sendReaction({ to, messageId, reaction }) {
   if (!isClientReady()) throw new Error('WhatsApp client is not ready');
-  const chatId = sanitizeRecipient(to);
+  // `to` is omitted (null/undefined) for reactions — the reaction is applied to
+  // the message's own chat, not sent to a separate recipient.
+  const chatId = to ? sanitizeRecipient(to) : null;
   const waMsg = await client.getMessageById(messageId);
   if (!waMsg) throw new Error('Message not found');
   await waMsg.react(reaction || '');
