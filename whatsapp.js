@@ -118,6 +118,9 @@ function initWhatsApp({ sessionPath }) {
   });
 
   client.on('message', async (msg) => {
+    // Ignore status/broadcast feed messages — they come from 'status@broadcast'
+    // and are not regular chat messages.
+    if (msg.from === 'status@broadcast') return;
     try {
       await handleIncomingMessage(msg);
     } catch (err) {
@@ -127,6 +130,8 @@ function initWhatsApp({ sessionPath }) {
 
   // Message acknowledgement events
   client.on('message_ack', (msg, ack) => {
+    // Ignore acks for status/broadcast feed messages.
+    if (msg.from === 'status@broadcast') return;
     try {
       const ackNames = ['ERROR', 'PENDING', 'SENT', 'RECEIVED', 'READ', 'PLAYED'];
       const ackName = ackNames[ack] || `UNKNOWN_${ack}`;
