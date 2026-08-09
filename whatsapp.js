@@ -458,6 +458,31 @@ async function fetchMessageMediaByMessageId(messageId) {
 }
 
 /**
+ * Fetch messages from a specific phone number's chat, queried directly from
+ * WhatsApp Web (not from SQLite). Supports limit and fromMe filtering.
+ *
+ * `phone` is sanitized to a chat ID, the chat is looked up via
+ * `client.getChatById`, then `chat.fetchMessages()` is called which both
+ * returns the in-memory message array and lazy-loads older messages via
+ * `WAWebChatLoadMessages` when the requested limit exceeds what's cached.
+ */
+async function fetchChatMessages({ phone, limit = 50, fromMe = null }) {
+  if (!isClientReady()) throw new Error('WhatsApp client is not ready');
+
+  const chatId = sanitizeRecipient(phone);
+  const chat = await client.getChatById(chatId);
+  if (!chat) throw new Error(`No active chat found for ${phone}`);
+
+  const searchOptions = { limit: Math.min(200, Math.max(1, limit)) };
+  if (fromMe === true) searchOptions.fromMe = true;
+  else if (fromMe === false) searchOptions.fromMe = false;
+
+  const messages = await chat.fetchMessages(searchOptions);
+
+  return messages.map((msg) => serializeMessage(msg));
+}
+
+/**
  * Serialize a sent message to a clean response object.
  */
 function serializeMessage(msg) {
@@ -513,5 +538,6 @@ module.exports = {
   replyToMessage,
   sendReaction,
   fetchMessageMediaByMessageId,
+  fetchChatMessages,
   serializeMessage,
 };

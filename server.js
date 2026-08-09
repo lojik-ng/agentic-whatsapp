@@ -336,6 +336,38 @@ app.get('/me', async (req, res) => {
 });
 
 /**
+ * GET /chat-messages
+ *   Fetch messages for a specific phone number directly from WhatsApp Web.
+ *   `phone` is required and is auto-sanitized to a proper chat ID.
+ *
+ *   Query params:
+ *     limit   — number, default 50, max 200
+ *     fromMe  — 'true' / 'false' to filter; omit for both directions
+ */
+app.get('/chat-messages', async (req, res) => {
+  try {
+    const phone = req.query.phone;
+    if (!phone) return res.status(400).json({ error: '"phone" query parameter is required' });
+
+    const limit = req.query.limit
+      ? Math.min(200, Math.max(1, parseInt(req.query.limit, 10)))
+      : 50;
+    const fromMe =
+      req.query.fromMe === 'true'
+        ? true
+        : req.query.fromMe === 'false'
+          ? false
+          : null;
+
+    const messages = await wa.fetchChatMessages({ phone, limit, fromMe });
+    res.json({ fetchedAt: Date.now(), count: messages.length, messages });
+  } catch (err) {
+    const status = { 'No active chat found': 404 }[err.message] || 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+/**
  * POST /logout
  */
 app.post('/logout', async (req, res) => {
