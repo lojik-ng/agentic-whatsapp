@@ -123,6 +123,33 @@ app.get('/qr/:apiKey', (req, res) => {
 });
 
 /**
+ * GET /status/run-summary  — recent cron run summaries from the run_summaries table.
+ *
+ * Returns the most recent N runs so an operator can audit what the cron has
+ * been doing without trawling logs. Optional `?limit=N` query param (default 10).
+ */
+app.get('/status/run-summary', (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 10));
+    const rows = wa.getRecentRunSummaries({ limit });
+    res.json({
+      count: rows.length,
+      summaries: rows.map((r) => ({
+        runAt: r.run_at,
+        durationMs: r.duration_ms,
+        prospectsSeen: r.prospects_seen,
+        sendsAttempted: r.sends_attempted,
+        sendsSucceeded: r.sends_succeeded,
+        sendsFailed: r.sends_failed,
+        errors: r.errors_json ? JSON.parse(r.errors_json) : null,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
  * GET /qr/<api-key>/image.png  — returns the current QR code as a PNG image.
  * If no QR code is available, returns a 404.
  */
@@ -289,6 +316,45 @@ app.post('/resolve-lid', async (req, res) => {
       isEnterprise,
       resolved: chatId !== lid,
     });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /warm-chat  — pre-load a chat into the WA Web session cache.
+ *
+ *   Body: { chatId: "146900934197276@lid" }
+ *
+ *   Useful as a pre-step before a batch of sends, especially right after a
+ *   fresh session start when the contact cache is empty. Calls
+ *   `client.getChatById` which forces WA Web to register the chat.
+ *
+ *   Idempotent — calling it on an already-loaded chat is a no-op.
+ */
+app.post('/warm-chat', async (req, res) => {
+  try {
+    const { chatId } = req.body || {};
+    if (!chatId) return res.status(400).json({ error: '"chatId" is required' });
+    if (!wa.isClientReady()) return res.status(503).json({ error: 'WhatsApp client is not ready' });
+
+    const result = await wa.warmChat(chatId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * POST /cache/clear  — clear the in-memory LID-resolution cache.
+ *
+ *   Useful when the WA Web session has been re-paired and cached phone
+ *   numbers may no longer be valid. The cron can call this on startup.
+ */
+app.post('/cache/clear', async (req, res) => {
+  try {
+    wa.contactCache.clear();
+    res.json({ ok: true, cleared: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }

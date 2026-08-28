@@ -268,6 +268,7 @@ function getStatus() {
     readySince: internalStatus.readySince,
     hasQr: !!currentQr,
     lastEventAt: internalStatus.lastEventAt,
+    contactCacheSize: contactCache.size(),
     ...(initFailure ? { initError: initFailure.message } : {}),
   };
 }
@@ -320,6 +321,33 @@ function sanitizeRecipient(to) {
 }
 
 /**
+ * Retry a function with exponential backoff.
+ *
+ * Useful for transient failures (WA Web client still warming up, contact
+ * cache not yet populated after a fresh session, network blip). The function
+ * is retried up to `maxAttempts` times with delays of `baseDelayMs * 2^(n-1)`.
+ *
+ * `shouldRetry` controls which errors warrant a retry. By default we retry
+ * any error — for transient WA Web issues that's the right call, since
+ * these errors are usually self-healing within seconds.
+ */
+async function retryWithBackoff(fn, { maxAttempts = 3, baseDelayMs = 2000, shouldRetry = () => true, onRetry = null } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= maxAttempts || !shouldRetry(err)) break;
+      const delay = baseDelayMs * Math.pow(2, attempt - 1);
+      if (onRetry) onRetry(attempt, err, delay);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * Send a text message.
  *
  * For LID chats (`@lid` suffix) — which are how WhatsApp represents contacts
@@ -330,6 +358,10 @@ function sanitizeRecipient(to) {
  * send to that phone-format chat ID instead. If the contact is unknown to
  * the WhatsApp Web session we fall back to loading the chat via
  * `getChatById` (which can succeed for chats with a recent message sync).
+ *
+ * Retries: `sendText` is wrapped in retryWithBackoff (3 attempts, 2s/4s/8s)
+ * so transient failures (WA Web warming up after restart, contact cache
+ * still populating) self-heal without surfacing to the caller.
  */
 async function sendText({ to, body, quotedMessageId }) {
   if (!isClientReady()) throw new Error('WhatsApp client is not ready');
@@ -342,8 +374,24 @@ async function sendText({ to, body, quotedMessageId }) {
       if (waMsg) options.quotedMessage = waMsg;
     }
   }
-  chatId = await resolveLidToPhoneChatId(chatId);
-  const sent = await client.sendMessage(chatId, body, options);
+
+  const sent = await retryWithBackoff(
+    async (attempt) => {
+      // Re-resolve the LID on every retry — the contact cache may have
+      // populated since the last attempt (e.g. the cron sent a different
+      // message to the same chat, or the chat was warmed by a different
+      // process).
+      const resolved = await resolveLidToPhoneChatId(chatId);
+      return client.sendMessage(resolved, body, options);
+    },
+    {
+      maxAttempts: 3,
+      baseDelayMs: 2000,
+      onRetry: (attempt, err, delay) =>
+        console.warn(`sendText retry ${attempt} after ${delay}ms: ${err.message}`),
+    }
+  );
+
   // Persist the outbound message immediately — the message_ack event may never
   // fire (session crash, network drop) and would otherwise leave the DB with
   // no record of a message we know we sent. The ack event will still update
@@ -354,7 +402,7 @@ async function sendText({ to, body, quotedMessageId }) {
         messageId: sent.messageId,
         from: 'me',
         fromName: null,
-        chatId: chatId,
+        chatId: sent.to || chatId,
         type: sent.type || 'chat',
         body: sent.body || null,
         hasMedia: sent.type === 'ptt' ? 0 : 0,
@@ -371,8 +419,7 @@ async function sendText({ to, body, quotedMessageId }) {
  */
 async function sendMedia({ to, buffer, mimetype, filename, caption, type, quotedMessageId }) {
   if (!isClientReady()) throw new Error('WhatsApp client is not ready');
-  let chatId = sanitizeRecipient(to);
-  const MediaCtor = MessageMedia.fromBuffer ? MessageMedia : null;
+  const chatId = sanitizeRecipient(to);
   const media = MessageMedia.fromBuffer(buffer, mimetype || 'application/octet-stream');
   media.filename = filename || 'file';
   const options = {};
@@ -384,15 +431,27 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
       if (waMsg) options.quotedMessage = waMsg;
     }
   }
-  chatId = await resolveLidToPhoneChatId(chatId);
-  const sent = await client.sendMessage(chatId, media, options);
+
+  const sent = await retryWithBackoff(
+    async () => {
+      const resolved = await resolveLidToPhoneChatId(chatId);
+      return client.sendMessage(resolved, media, options);
+    },
+    {
+      maxAttempts: 3,
+      baseDelayMs: 2000,
+      onRetry: (attempt, err, delay) =>
+        console.warn(`sendMedia retry ${attempt} after ${delay}ms: ${err.message}`),
+    }
+  );
+
   if (sent) {
     try {
       db.insertMessage({
         messageId: sent.messageId,
         from: 'me',
         fromName: null,
-        chatId: chatId,
+        chatId: sent.to || chatId,
         type: sent.type || 'image',
         body: sent.body || null,
         hasMedia: 1,
@@ -411,7 +470,7 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
  */
 async function sendSticker({ to, buffer, quotedMessageId }) {
   if (!isClientReady()) throw new Error('WhatsApp client is not ready');
-  let chatId = sanitizeRecipient(to);
+  const chatId = sanitizeRecipient(to);
   const media = MessageMedia.fromBuffer(buffer, 'image/webp');
   media.filename = 'sticker.webp';
   const options = { sendStickerAsSticker: true, stickerMetadata: { author: 'agentic-whatsapp', keepScale: true } };
@@ -422,15 +481,27 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
       if (waMsg) options.quotedMessage = waMsg;
     }
   }
-  chatId = await resolveLidToPhoneChatId(chatId);
-  const sent = await client.sendMessage(chatId, media, options);
+
+  const sent = await retryWithBackoff(
+    async () => {
+      const resolved = await resolveLidToPhoneChatId(chatId);
+      return client.sendMessage(resolved, media, options);
+    },
+    {
+      maxAttempts: 3,
+      baseDelayMs: 2000,
+      onRetry: (attempt, err, delay) =>
+        console.warn(`sendSticker retry ${attempt} after ${delay}ms: ${err.message}`),
+    }
+  );
+
   if (sent) {
     try {
       db.insertMessage({
         messageId: sent.messageId,
         from: 'me',
         fromName: null,
-        chatId: chatId,
+        chatId: sent.to || chatId,
         type: 'sticker',
         body: null,
         hasMedia: 1,
@@ -445,10 +516,55 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
 }
 
 /**
+ * Tiny LRU cache for resolved contacts.
+ *
+ * `client.getContact(LID)` is an expensive WA Web round-trip; if the cron
+ * runs every 5 minutes against the same 30 prospects, we want to avoid
+ * hammering the contact store. The cache is in-memory only — when the
+ * WA Web session restarts we lose the cache, which is fine because we
+ * re-resolve on demand anyway.
+ */
+function createLruCache({ max = 500, ttlMs = 5 * 60 * 1000 } = {}) {
+  const store = new Map(); // key -> { value, expiresAt }
+  return {
+    get(key) {
+      const entry = store.get(key);
+      if (!entry) return undefined;
+      if (entry.expiresAt < Date.now()) {
+        store.delete(key);
+        return undefined;
+      }
+      // Refresh insertion order for true LRU semantics.
+      store.delete(key);
+      store.set(key, entry);
+      return entry.value;
+    },
+    set(key, value) {
+      if (store.has(key)) store.delete(key);
+      store.set(key, { value, expiresAt: Date.now() + ttlMs });
+      // Evict oldest entries until we're under the cap.
+      while (store.size > max) {
+        const oldest = store.keys().next().value;
+        store.delete(oldest);
+      }
+    },
+    clear() {
+      store.clear();
+    },
+    size() {
+      return store.size;
+    },
+  };
+}
+
+const contactCache = createLruCache({ max: 500, ttlMs: 5 * 60 * 1000 });
+
+/**
  * Resolve a LID chat ID (`xxx@lid`) to a phone-format chat ID that
  * `client.sendMessage` can actually deliver to.
  *
  * Strategy:
+ *   0. Cache hit  → return immediately (no WA round-trip).
  *   1. Ask WhatsApp Web for the contact. If known, return its `id._serialized`
  *      (e.g. `234XXXXXXXXXX@c.us`).
  *   2. If the contact is unknown but the chat can be loaded via
@@ -462,26 +578,83 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
 async function resolveLidToPhoneChatId(chatId) {
   if (!chatId.endsWith('@lid')) return chatId;
 
+  // 0. Cache hit — fast path, no WA round-trip.
+  const cached = contactCache.get(chatId);
+  if (cached !== undefined) return cached;
+
+  // 0b. SQLite fallback — survives session restarts where the in-memory LRU
+  //     is gone. The WA round-trip below will refresh this on success.
+  try {
+    const dbContact = db.getContactByLid(chatId);
+    if (dbContact && dbContact.chatId) {
+      contactCache.set(chatId, dbContact.chatId);
+      return dbContact.chatId;
+    }
+  } catch (_) { /* non-fatal — DB may not be ready in tests */ }
+
+  let resolved = null;
+  let contactMeta = null;
+
   // 1. Try the contact lookup first — gives us the real phone number.
   try {
     const contact = await client.getContact(chatId);
     if (contact && contact.id && contact.id._serialized) {
-      return contact.id._serialized;
+      resolved = contact.id._serialized;
+      contactMeta = {
+        phone: contact.number || null,
+        name: contact.pushname || contact.name || null,
+        isBusiness: !!contact.isBusiness,
+        isEnterprise: !!contact.isEnterprise,
+      };
     }
   } catch (err) {
     // Unknown contact — fall through to chat-load attempt.
   }
 
   // 2. Fallback: load the chat so the client has it in its cache.
+  if (!resolved) {
+    try {
+      await client.getChatById(chatId);
+      resolved = chatId;
+    } catch (err) {
+      throw new Error(
+        `LID chat "${chatId}" could not be resolved: contact unknown and chat ` +
+        `could not be loaded (${err.message}). The recipient has likely never ` +
+        `messaged this WhatsApp account.`
+      );
+    }
+  }
+
+  // Persist to both caches so subsequent runs are fast.
+  contactCache.set(chatId, resolved);
   try {
-    await client.getChatById(chatId);
-    return chatId;
+    db.upsertContact({
+      lid: chatId,
+      phone: contactMeta?.phone ?? null,
+      chatId: resolved,
+      name: contactMeta?.name ?? null,
+      isBusiness: contactMeta?.isBusiness ?? false,
+      isEnterprise: contactMeta?.isEnterprise ?? false,
+    });
+  } catch (_) { /* non-fatal — DB write failures must not block sends */ }
+
+  return resolved;
+}
+
+/**
+ * Warm a chat by LID — calls `client.getChatById` so the WA Web client
+ * loads the chat into its local cache. Useful as a pre-step before a
+ * batch of sends, especially right after a fresh session start.
+ */
+async function warmChat(chatId) {
+  if (!chatId.endsWith('@lid') && !chatId.endsWith('@c.us') && !chatId.endsWith('@g.us')) {
+    throw new Error(`Invalid chat ID: ${chatId}`);
+  }
+  try {
+    const chat = await client.getChatById(chatId);
+    return { ok: true, chatId, loaded: !!chat };
   } catch (err) {
-    throw new Error(
-      `LID chat "${chatId}" could not be resolved: contact unknown and chat ` +
-      `could not be loaded (${err.message}). The recipient has likely never ` +
-      `messaged this WhatsApp account.`
-    );
+    return { ok: false, chatId, error: err.message };
   }
 }
 
@@ -651,6 +824,9 @@ module.exports = {
   sendReaction,
   fetchMessageMediaByMessageId,
   resolveLidToPhoneChatId,
+  warmChat,
   fetchChatMessages,
   serializeMessage,
+  contactCache,
+  getRecentRunSummaries: db.getRecentRunSummaries,
 };

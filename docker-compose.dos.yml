@@ -1,0 +1,22 @@
+# docker-compose.dos.yml
+#
+# DOS-specific override for agentic-whatsapp. Use with:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dos.yml up -d --build
+#
+# Changes from the base compose:
+#   - Container name -> agentic-whatsapp-dos (so it doesn't clash with the SO container)
+#   - Image name     -> agentic-whatsapp-dos:latest (separate image tag)
+#   - Host port      -> 3057 (SO uses 3056)
+#   - PORT env var   -> 3057 (so the server + healthcheck agree)
+#
+# Everything else (build context, env_file, volumes, capabilities) is inherited
+# from docker-compose.yml — no duplication needed.
+services:
+  whatsapp:
+    container_name: agentic-whatsapp-dos
+    image: agentic-whatsapp-dos:latest
+    ports:
+      - "3057:3057"
+    environment:
+      - PORT=3057

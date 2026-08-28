@@ -48,6 +48,38 @@ function initDb(dataDir) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_receipts_timestamp ON receipts(timestamp);
+
+    -- LID → phone resolution cache.
+    -- Persisted across WA Web session restarts so the first send after a
+    -- restart doesn't have to re-resolve every prospect. The in-memory LRU
+    -- cache in whatsapp.js is faster; this is the durable fallback.
+    CREATE TABLE IF NOT EXISTS contacts (
+      lid TEXT PRIMARY KEY,
+      phone TEXT,
+      chat_id TEXT,
+      name TEXT,
+      is_business INTEGER DEFAULT 0,
+      is_enterprise INTEGER DEFAULT 0,
+      resolved_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
+
+    -- Cron run summaries — one row per scheduled tick. Lets the operator
+    -- see what the cron has been doing without trawling logs.
+    CREATE TABLE IF NOT EXISTS run_summaries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_at INTEGER NOT NULL,
+      duration_ms INTEGER,
+      prospects_seen INTEGER,
+      sends_attempted INTEGER,
+      sends_succeeded INTEGER,
+      sends_failed INTEGER,
+      errors_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_run_summaries_at ON run_summaries(run_at);
   `);
 
   return db;
@@ -276,6 +308,90 @@ function closeDb() {
   }
 }
 
+/**
+ * Upsert a contact resolution into the contacts cache.
+ *
+ * Used by whatsapp.js when `client.getContact(LID)` succeeds. Subsequent
+ * lookups for the same LID hit this cache before the more expensive WA
+ * round-trip.
+ */
+function upsertContact({ lid, phone = null, chatId = null, name = null, isBusiness = false, isEnterprise = false }) {
+  if (!db) return;
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO contacts (lid, phone, chat_id, name, is_business, is_enterprise, resolved_at, last_seen_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(lid) DO UPDATE SET
+      phone         = excluded.phone,
+      chat_id       = excluded.chat_id,
+      name          = excluded.name,
+      is_business   = excluded.is_business,
+      is_enterprise = excluded.is_enterprise,
+      resolved_at   = excluded.resolved_at,
+      last_seen_at  = excluded.last_seen_at
+  `).run(
+    lid,
+    toText(phone),
+    toText(chatId),
+    toText(name),
+    isBusiness ? 1 : 0,
+    isEnterprise ? 1 : 0,
+    now,
+    now
+  );
+}
+
+/**
+ * Look up a cached contact by LID.
+ *
+ * Returns the full row or null. Use this when the in-memory LRU cache
+ * (in whatsapp.js) misses, before falling back to a WA round-trip.
+ */
+function getContactByLid(lid) {
+  if (!db) return null;
+  const row = db.prepare(`SELECT * FROM contacts WHERE lid = ?`).get(lid);
+  if (!row) return null;
+  return {
+    lid: row.lid,
+    phone: row.phone,
+    chatId: row.chat_id,
+    name: row.name,
+    isBusiness: row.is_business === 1,
+    isEnterprise: row.is_enterprise === 1,
+    resolvedAt: row.resolved_at,
+    lastSeenAt: row.last_seen_at,
+  };
+}
+
+/**
+ * Record a cron run summary so the operator can audit what each tick did.
+ */
+function insertRunSummary({ runAt = Date.now(), durationMs = null, prospectsSeen = null, sendsAttempted = null, sendsSucceeded = null, sendsFailed = null, errors = null } = {}) {
+  if (!db) return;
+  db.prepare(`
+    INSERT INTO run_summaries (run_at, duration_ms, prospects_seen, sends_attempted, sends_succeeded, sends_failed, errors_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    runAt,
+    durationMs,
+    prospectsSeen,
+    sendsAttempted,
+    sendsSucceeded,
+    sendsFailed,
+    errors ? JSON.stringify(errors) : null
+  );
+}
+
+/**
+ * Fetch the most recent run summaries for `/status/run-summary`.
+ */
+function getRecentRunSummaries({ limit = 10 } = {}) {
+  if (!db) return [];
+  return db.prepare(`
+    SELECT * FROM run_summaries ORDER BY run_at DESC LIMIT ?
+  `).all(limit);
+}
+
 module.exports = {
   initDb,
   insertMessage,
@@ -284,5 +400,9 @@ module.exports = {
   getMessageByMessageId,
   insertReceipt,
   getReceipts,
+  upsertContact,
+  getContactByLid,
+  insertRunSummary,
+  getRecentRunSummaries,
   closeDb,
 };
