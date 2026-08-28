@@ -6,13 +6,8 @@ services:
       dockerfile: Dockerfile
     image: agentic-whatsapp:latest
     restart: always
-    # Both 3056 (SO) and 3057 (DOS) are exposed by default so the DOS override
-    # can use 3057 without conflict. The PORT env var (set per-override below)
-    # controls which the server actually listens on. In production only one
-    # port is bound per container.
     ports:
       - "3056:3056"
-      - "3057:3057"
     environment:
       - PORT=3056
       - DATA_DIR=/usr/src/app/data

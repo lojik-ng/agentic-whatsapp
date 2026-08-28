@@ -12,6 +12,11 @@
 #
 # Everything else (build context, env_file, volumes, capabilities) is inherited
 # from docker-compose.yml — no duplication needed.
+#
+# Port-mapping note: docker-compose MERGES port lists across overrides. We
+# declare ports here in long-form so the override REPLACES (rather than
+# augments) the base 3056 mapping — otherwise the DOS container would try to
+# also bind 3056, which clashes with the running SO container.
 services:
   whatsapp:
     container_name: agentic-whatsapp-dos
