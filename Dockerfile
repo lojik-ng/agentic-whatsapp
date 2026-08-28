@@ -80,9 +80,10 @@ ENV NODE_ENV=production
 # Expose the API port
 EXPOSE 3056
 
-# Healthcheck
+# Healthcheck — use the PORT env var so the check matches whatever port
+# the server runs on (3056 for SO, 3057 for DOS).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3056/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+    CMD node -e "require('http').get('http://localhost:' + (process.env.PORT || 3056) + '/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
 # Run the app
 CMD ["node", "server.js"]
