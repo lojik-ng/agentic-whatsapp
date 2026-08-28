@@ -321,6 +321,12 @@ function sanitizeRecipient(to) {
 
 /**
  * Send a text message.
+ *
+ * For LID chats (`@lid` suffix) — which are how WhatsApp represents contacts
+ * whose phone numbers are not visible to us — `client.sendMessage` will
+ * silently resolve to `null` unless the chat has been loaded into the local
+ * cache first. We call `getChatById` (a no-op when the chat is already
+ * cached, a forced load otherwise) before sending.
  */
 async function sendText({ to, body, quotedMessageId }) {
   if (!isClientReady()) throw new Error('WhatsApp client is not ready');
@@ -331,6 +337,13 @@ async function sendText({ to, body, quotedMessageId }) {
     if (quoted) {
       const waMsg = await client.getMessageById(quoted.messageId);
       if (waMsg) options.quotedMessage = waMsg;
+    }
+  }
+  if (chatId.endsWith('@lid')) {
+    try {
+      await client.getChatById(chatId);
+    } catch (err) {
+      throw new Error(`LID chat "${chatId}" could not be loaded: ${err.message}`);
     }
   }
   const sent = await client.sendMessage(chatId, body, options);
@@ -355,6 +368,13 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
       if (waMsg) options.quotedMessage = waMsg;
     }
   }
+  if (chatId.endsWith('@lid')) {
+    try {
+      await client.getChatById(chatId);
+    } catch (err) {
+      throw new Error(`LID chat "${chatId}" could not be loaded: ${err.message}`);
+    }
+  }
   const sent = await client.sendMessage(chatId, media, options);
   return serializeMessage(sent);
 }
@@ -373,6 +393,13 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
     if (quoted) {
       const waMsg = await client.getMessageById(quoted.messageId);
       if (waMsg) options.quotedMessage = waMsg;
+    }
+  }
+  if (chatId.endsWith('@lid')) {
+    try {
+      await client.getChatById(chatId);
+    } catch (err) {
+      throw new Error(`LID chat "${chatId}" could not be loaded: ${err.message}`);
     }
   }
   const sent = await client.sendMessage(chatId, media, options);
