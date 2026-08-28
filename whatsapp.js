@@ -324,13 +324,16 @@ function sanitizeRecipient(to) {
  *
  * For LID chats (`@lid` suffix) — which are how WhatsApp represents contacts
  * whose phone numbers are not visible to us — `client.sendMessage` will
- * silently resolve to `null` unless the chat has been loaded into the local
- * cache first. We call `getChatById` (a no-op when the chat is already
- * cached, a forced load otherwise) before sending.
+ * silently resolve to `null` because the client has no way to address the
+ * chat without resolving the underlying contact. We use `client.getContact`
+ * to ask WhatsApp Web for the real phone number (`id._serialized`), then
+ * send to that phone-format chat ID instead. If the contact is unknown to
+ * the WhatsApp Web session we fall back to loading the chat via
+ * `getChatById` (which can succeed for chats with a recent message sync).
  */
 async function sendText({ to, body, quotedMessageId }) {
   if (!isClientReady()) throw new Error('WhatsApp client is not ready');
-  const chatId = sanitizeRecipient(to);
+  let chatId = sanitizeRecipient(to);
   const options = {};
   if (quotedMessageId) {
     const quoted = await getMessageById(quotedMessageId);
@@ -339,13 +342,7 @@ async function sendText({ to, body, quotedMessageId }) {
       if (waMsg) options.quotedMessage = waMsg;
     }
   }
-  if (chatId.endsWith('@lid')) {
-    try {
-      await client.getChatById(chatId);
-    } catch (err) {
-      throw new Error(`LID chat "${chatId}" could not be loaded: ${err.message}`);
-    }
-  }
+  chatId = await resolveLidToPhoneChatId(chatId);
   const sent = await client.sendMessage(chatId, body, options);
   return serializeMessage(sent);
 }
@@ -355,7 +352,7 @@ async function sendText({ to, body, quotedMessageId }) {
  */
 async function sendMedia({ to, buffer, mimetype, filename, caption, type, quotedMessageId }) {
   if (!isClientReady()) throw new Error('WhatsApp client is not ready');
-  const chatId = sanitizeRecipient(to);
+  let chatId = sanitizeRecipient(to);
   const MediaCtor = MessageMedia.fromBuffer ? MessageMedia : null;
   const media = MessageMedia.fromBuffer(buffer, mimetype || 'application/octet-stream');
   media.filename = filename || 'file';
@@ -368,13 +365,7 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
       if (waMsg) options.quotedMessage = waMsg;
     }
   }
-  if (chatId.endsWith('@lid')) {
-    try {
-      await client.getChatById(chatId);
-    } catch (err) {
-      throw new Error(`LID chat "${chatId}" could not be loaded: ${err.message}`);
-    }
-  }
+  chatId = await resolveLidToPhoneChatId(chatId);
   const sent = await client.sendMessage(chatId, media, options);
   return serializeMessage(sent);
 }
@@ -384,7 +375,7 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
  */
 async function sendSticker({ to, buffer, quotedMessageId }) {
   if (!isClientReady()) throw new Error('WhatsApp client is not ready');
-  const chatId = sanitizeRecipient(to);
+  let chatId = sanitizeRecipient(to);
   const media = MessageMedia.fromBuffer(buffer, 'image/webp');
   media.filename = 'sticker.webp';
   const options = { sendStickerAsSticker: true, stickerMetadata: { author: 'agentic-whatsapp', keepScale: true } };
@@ -395,15 +386,50 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
       if (waMsg) options.quotedMessage = waMsg;
     }
   }
-  if (chatId.endsWith('@lid')) {
-    try {
-      await client.getChatById(chatId);
-    } catch (err) {
-      throw new Error(`LID chat "${chatId}" could not be loaded: ${err.message}`);
-    }
-  }
+  chatId = await resolveLidToPhoneChatId(chatId);
   const sent = await client.sendMessage(chatId, media, options);
   return serializeMessage(sent);
+}
+
+/**
+ * Resolve a LID chat ID (`xxx@lid`) to a phone-format chat ID that
+ * `client.sendMessage` can actually deliver to.
+ *
+ * Strategy:
+ *   1. Ask WhatsApp Web for the contact. If known, return its `id._serialized`
+ *      (e.g. `234XXXXXXXXXX@c.us`).
+ *   2. If the contact is unknown but the chat can be loaded via
+ *      `getChatById`, fall back to loading it and returning the original LID —
+ *      the subsequent `sendMessage` may succeed because the chat has just
+ *      been registered locally.
+ *   3. If both fail, throw a clear error.
+ *
+ * Non-LID inputs are returned unchanged.
+ */
+async function resolveLidToPhoneChatId(chatId) {
+  if (!chatId.endsWith('@lid')) return chatId;
+
+  // 1. Try the contact lookup first — gives us the real phone number.
+  try {
+    const contact = await client.getContact(chatId);
+    if (contact && contact.id && contact.id._serialized) {
+      return contact.id._serialized;
+    }
+  } catch (err) {
+    // Unknown contact — fall through to chat-load attempt.
+  }
+
+  // 2. Fallback: load the chat so the client has it in its cache.
+  try {
+    await client.getChatById(chatId);
+    return chatId;
+  } catch (err) {
+    throw new Error(
+      `LID chat "${chatId}" could not be resolved: contact unknown and chat ` +
+      `could not be loaded (${err.message}). The recipient has likely never ` +
+      `messaged this WhatsApp account.`
+    );
+  }
 }
 
 /**
@@ -571,6 +597,7 @@ module.exports = {
   replyToMessage,
   sendReaction,
   fetchMessageMediaByMessageId,
+  resolveLidToPhoneChatId,
   fetchChatMessages,
   serializeMessage,
 };

@@ -230,6 +230,67 @@ app.post('/send/text', async (req, res) => {
 });
 
 /**
+ * POST /resolve-lid  — translate a LID chat ID into the phone-format chat ID
+ *   that WhatsApp Web's sendMessage actually accepts.
+ *
+ *   Body: { lid: "146900934197276@lid" }
+ *   Returns: {
+ *     lid: "146900934197276@lid",          // original input
+ *     phone: "+234XXXXXXXXXX",             // normalized phone number (when known)
+ *     chatId: "234XXXXXXXXXX@c.us",        // the chat ID sendMessage accepts
+ *     name: "Ruth Utulu",                  // pushname (when known)
+ *     isBusiness: false,
+ *     isEnterprise: false,
+ *     resolved: true                       // false if contact is unknown
+ *   }
+ *
+ *   Use this when you have a LID from incoming-messages and want to send a
+ *   reply. /send/text and /send/reply already call this internally; calling
+ *   it directly is only needed when you want to inspect the underlying phone
+ *   number (e.g. to store it in a CRM before sending).
+ */
+app.post('/resolve-lid', async (req, res) => {
+  try {
+    const { lid } = req.body || {};
+    if (!lid) return res.status(400).json({ error: '"lid" is required' });
+
+    if (!wa.isClientReady()) {
+      return res.status(503).json({ error: 'WhatsApp client is not ready' });
+    }
+
+    const chatId = await wa.resolveLidToPhoneChatId(lid);
+
+    // Pull full contact metadata for the response — best effort; do not throw
+    // if it fails because the chatId we already have is enough to send.
+    let phone = null;
+    let name = null;
+    let isBusiness = false;
+    let isEnterprise = false;
+    try {
+      const contact = await wa.getClient().getContact(lid);
+      if (contact && contact.id) {
+        phone = contact.number || null;
+        name = contact.pushname || contact.name || null;
+        isBusiness = !!contact.isBusiness;
+        isEnterprise = !!contact.isEnterprise;
+      }
+    } catch (_) { /* ignore */ }
+
+    res.json({
+      lid,
+      phone,
+      chatId,
+      name,
+      isBusiness,
+      isEnterprise,
+      resolved: chatId !== lid,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
  * POST /send/reply  — reply to a specific message (alias of /send/text with quotedMessageId).
  *   Body: { to: string, body: string, quotedMessageId: string }
  */
