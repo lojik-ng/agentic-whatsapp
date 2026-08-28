@@ -8,11 +8,15 @@
 # What it does:
 #   1. SSH into the host
 #   2. git fetch + reset --hard origin/main
-#   3. docker compose up -d --build using the right override file
+#   3. docker compose up -d --build using the .env-defined port/image
 #   4. Wait for the container to report healthy
 #   5. Print a final status snapshot
 #
 # Idempotent — re-running after a code change is safe.
+#
+# The container_name, port, and image name are read from .env on the remote
+# (CONTAINER_NAME, HOST_PORT, etc.) — see docker-compose.yml for the full
+# list. Each deployment repo (SO, DOS) has its own .env with the right values.
 
 set -euo pipefail
 
@@ -29,34 +33,32 @@ SSH_TARGET="$USER@$HOST"
 case "$LINE" in
   so)
     REPO_PATH="/home/leke/agentic-whatsapp"
-    CONTAINER="agentic-whatsapp"
-    COMPOSE_FLAGS="-f docker-compose.yml"
     PORT=3056
     ;;
   dos)
     REPO_PATH="/home/leke/agentic-whatsapp-DOS"
-    CONTAINER="agentic-whatsapp-dos"
-    COMPOSE_FLAGS="-f docker-compose.yml -f docker-compose.dos.yml"
     PORT=3057
     ;;
 esac
 
-echo ">>> Deploying $LINE to $HOST:$REPO_PATH"
+echo ">>> Deploying $LINE to $SSH_TARGET:$REPO_PATH"
 ssh "$SSH_TARGET" "cd $REPO_PATH && git fetch origin main && git reset --hard origin/main"
-ssh "$SSH_TARGET" "cd $REPO_PATH && docker compose $COMPOSE_FLAGS up -d --build"
+ssh "$SSH_TARGET" "cd $REPO_PATH && docker compose up -d --build"
 
-echo ">>> Waiting for $CONTAINER to become healthy..."
+# Wait for healthy. Container name comes from .env on the remote; we just
+# look up the first container whose label includes 'whatsapp'.
+echo ">>> Waiting for the container to become healthy..."
 for i in {1..30}; do
-  STATUS=$(ssh "$SSH_TARGET" "docker inspect --format='{{.State.Health.Status}}' $CONTAINER 2>/dev/null" || echo "missing")
+  STATUS=$(ssh "$SSH_TARGET" "docker ps --filter 'label=com.docker.compose.project=agentic-whatsapp' --filter 'label=com.docker.compose.service=whatsapp' --format '{{.Status}}' 2>/dev/null | grep -oE '\\(health[a-z]+\\)' | head -1" || echo "(starting)")
   echo "  attempt $i: $STATUS"
-  if [[ "$STATUS" == "healthy" ]]; then
+  if [[ "$STATUS" == "(healthy)" ]]; then
     break
   fi
   sleep 2
 done
 
 echo ">>> Final status:"
-ssh "$SSH_TARGET" "docker ps --filter name=$CONTAINER --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+ssh "$SSH_TARGET" "docker ps --filter 'label=com.docker.compose.project=agentic-whatsapp' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
 echo ">>> /health response:"
 ssh "$SSH_TARGET" "curl -s http://localhost:$PORT/health || true"
 echo ""

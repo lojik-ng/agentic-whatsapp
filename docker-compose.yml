@@ -1,15 +1,31 @@
+# docker-compose.yml
+#
+# Fully parameterized via .env. Each deployment (SO/DOS/dev/staging) only
+# needs to override the relevant vars in .env — no compose override file
+# required. docker-compose auto-loads .env from this directory.
+#
+# Required vars in .env:
+#   CONTAINER_NAME   — agentic-whatsapp / agentic-whatsapp-dos
+#   IMAGE_NAME       — agentic-whatsapp / agentic-whatsapp-dos
+#   IMAGE_TAG        — image tag (default: latest)
+#   HOST_PORT        — port exposed on the host
+#   CONTAINER_PORT   — port the server listens on inside the container
+#                      (also exposed as PORT env var to the Node app)
+#
+# Plus the runtime secrets (WHATSAPP_API_KEY etc.) which are loaded
+# separately via the `env_file: .env` directive below.
 services:
   whatsapp:
-    container_name: agentic-whatsapp
+    container_name: ${CONTAINER_NAME}
+    image: ${IMAGE_NAME}:${IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
-    image: agentic-whatsapp:latest
     restart: always
     ports:
-      - "3056:3056"
+      - "${HOST_PORT}:${CONTAINER_PORT}"
     environment:
-      - PORT=3056
+      - PORT=${CONTAINER_PORT}
       - DATA_DIR=/usr/src/app/data
       - PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
       - NODE_ENV=production
@@ -26,4 +42,3 @@ services:
       - SETGID
       - SETUID
       - DAC_OVERRIDE
-
