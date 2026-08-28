@@ -17,6 +17,9 @@ services:
     container_name: agentic-whatsapp-dos
     image: agentic-whatsapp-dos:latest
     ports:
-      - "3057:3057"
+      - target: 3057
+        published: "3057"
+        protocol: tcp
+        mode: ingress
     environment:
       - PORT=3057

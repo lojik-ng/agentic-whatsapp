@@ -23,6 +23,8 @@ if [[ "$LINE" != "so" && "$LINE" != "dos" ]]; then
 fi
 
 HOST="102.223.186.142"
+USER="leke"
+SSH_TARGET="$USER@$HOST"
 
 case "$LINE" in
   so)
@@ -40,12 +42,12 @@ case "$LINE" in
 esac
 
 echo ">>> Deploying $LINE to $HOST:$REPO_PATH"
-ssh "$HOST" "cd $REPO_PATH && git fetch origin main && git reset --hard origin/main"
-ssh "$HOST" "cd $REPO_PATH && docker compose $COMPOSE_FLAGS up -d --build"
+ssh "$SSH_TARGET" "cd $REPO_PATH && git fetch origin main && git reset --hard origin/main"
+ssh "$SSH_TARGET" "cd $REPO_PATH && docker compose $COMPOSE_FLAGS up -d --build"
 
 echo ">>> Waiting for $CONTAINER to become healthy..."
 for i in {1..30}; do
-  STATUS=$(ssh "$HOST" "docker inspect --format='{{.State.Health.Status}}' $CONTAINER 2>/dev/null" || echo "missing")
+  STATUS=$(ssh "$SSH_TARGET" "docker inspect --format='{{.State.Health.Status}}' $CONTAINER 2>/dev/null" || echo "missing")
   echo "  attempt $i: $STATUS"
   if [[ "$STATUS" == "healthy" ]]; then
     break
@@ -54,7 +56,7 @@ for i in {1..30}; do
 done
 
 echo ">>> Final status:"
-ssh "$HOST" "docker ps --filter name=$CONTAINER --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+ssh "$SSH_TARGET" "docker ps --filter name=$CONTAINER --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
 echo ">>> /health response:"
-ssh "$HOST" "curl -s http://localhost:$PORT/health || true"
+ssh "$SSH_TARGET" "curl -s http://localhost:$PORT/health || true"
 echo ""
