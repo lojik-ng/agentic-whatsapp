@@ -286,8 +286,9 @@ function isClientReady() {
 
 /**
  * Sanitize a recipient phone number / chat id.
- * Accepts:  +1 (234) 567-890,  1234567890,  1234567890@c.us,  120363...@g.us
- * Returns:  properly formatted chat id ending with @c.us or @g.us.
+ * Accepts:  +1 (234) 567-890,  1234567890,  1234567890@c.us,  120363...@g.us,
+ *           146900934197276@lid  (WhatsApp LID — opaque local identifier)
+ * Returns:  properly formatted chat id ending with @c.us, @g.us, or @lid.
  */
 function sanitizeRecipient(to) {
   if (!to || typeof to !== 'string') {
@@ -297,6 +298,11 @@ function sanitizeRecipient(to) {
 
   // Group ids already correct
   if (original.endsWith('@g.us')) return original;
+
+  // LID (WhatsApp Local Identifier) — opaque internal handle. Must be sent
+  // verbatim as @lid. Stripping the suffix and treating the digits as a
+  // phone number produces "No LID for user" on the server. Pass through.
+  if (original.endsWith('@lid')) return original;
 
   // Already a chat id ending in @c.us; allow as-is
   if (original.endsWith('@c.us')) {
