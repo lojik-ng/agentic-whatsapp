@@ -344,6 +344,25 @@ async function sendText({ to, body, quotedMessageId }) {
   }
   chatId = await resolveLidToPhoneChatId(chatId);
   const sent = await client.sendMessage(chatId, body, options);
+  // Persist the outbound message immediately — the message_ack event may never
+  // fire (session crash, network drop) and would otherwise leave the DB with
+  // no record of a message we know we sent. The ack event will still update
+  // the receipt table when it does arrive.
+  if (sent) {
+    try {
+      db.insertMessage({
+        messageId: sent.messageId,
+        from: 'me',
+        fromName: null,
+        chatId: chatId,
+        type: sent.type || 'chat',
+        body: sent.body || null,
+        hasMedia: sent.type === 'ptt' ? 0 : 0,
+        timestamp: sent.timestamp ? sent.timestamp * 1000 : Date.now(),
+        receivedAt: Date.now(),
+      });
+    } catch (_) { /* non-fatal — ack event will still cover us */ }
+  }
   return serializeMessage(sent);
 }
 
@@ -367,6 +386,23 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
   }
   chatId = await resolveLidToPhoneChatId(chatId);
   const sent = await client.sendMessage(chatId, media, options);
+  if (sent) {
+    try {
+      db.insertMessage({
+        messageId: sent.messageId,
+        from: 'me',
+        fromName: null,
+        chatId: chatId,
+        type: sent.type || 'image',
+        body: sent.body || null,
+        hasMedia: 1,
+        mimetype: mimetype || null,
+        filename: filename || null,
+        timestamp: sent.timestamp ? sent.timestamp * 1000 : Date.now(),
+        receivedAt: Date.now(),
+      });
+    } catch (_) { /* non-fatal */ }
+  }
   return serializeMessage(sent);
 }
 
@@ -388,6 +424,23 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
   }
   chatId = await resolveLidToPhoneChatId(chatId);
   const sent = await client.sendMessage(chatId, media, options);
+  if (sent) {
+    try {
+      db.insertMessage({
+        messageId: sent.messageId,
+        from: 'me',
+        fromName: null,
+        chatId: chatId,
+        type: 'sticker',
+        body: null,
+        hasMedia: 1,
+        mimetype: 'image/webp',
+        filename: 'sticker.webp',
+        timestamp: sent.timestamp ? sent.timestamp * 1000 : Date.now(),
+        receivedAt: Date.now(),
+      });
+    } catch (_) { /* non-fatal */ }
+  }
   return serializeMessage(sent);
 }
 
