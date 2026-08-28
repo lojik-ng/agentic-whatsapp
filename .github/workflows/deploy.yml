@@ -1,0 +1,70 @@
+name: Deploy
+
+# Runs on every push to main, plus manual trigger.
+# Deploys the SO service if this is the SO repo, or the DOS service if this
+# is the DOS repo. The line is selected by the SERVICE secret set per-repo.
+#
+# Setup steps (one-time, on GitHub):
+#   1. Settings → Secrets and variables → Actions → New repository secret
+#   2. Name:  SERVICE       Value:  so        (for SO repo)
+#      Name:  SERVICE       Value:  dos       (for DOS repo)
+#      Name:  SSH_KEY       Value:  contents of ~/.ssh/id_ed25519 (private key)
+#      Name:  SSH_USER      Value:  leke
+#      Name:  SSH_HOST      Value:  102.223.186.142
+#
+# Why per-repo secrets: each repo only deploys ITS service. No branching,
+# no matrix — just one job, one deploy, per push.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SERVICE:  ${{ secrets.SERVICE }}
+      SSH_KEY:  ${{ secrets.SSH_KEY }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+
+    steps:
+      - name: Validate config
+        if: env.SERVICE == '' || env.SSH_KEY == '' || env.SSH_USER == '' || env.SSH_HOST == ''
+        run: |
+          echo "::error::Missing required secrets. Set SERVICE, SSH_KEY, SSH_USER, SSH_HOST in repo settings."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Validate JS syntax
+        run: |
+          node --check whatsapp.js
+          node --check server.js
+          node --check db.js
+          bash -n scripts/deploy.sh
+
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -t ed25519 "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Verify SSH access
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new "$SSH_USER@$SSH_HOST" "echo connected; docker --version; docker compose version"
+
+      - name: Deploy
+        run: bash scripts/deploy.sh "$SERVICE"

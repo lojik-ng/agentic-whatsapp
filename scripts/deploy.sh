@@ -45,11 +45,14 @@ echo ">>> Deploying $LINE to $SSH_TARGET:$REPO_PATH"
 ssh "$SSH_TARGET" "cd $REPO_PATH && git fetch origin main && git reset --hard origin/main"
 ssh "$SSH_TARGET" "cd $REPO_PATH && docker compose up -d --build"
 
-# Wait for healthy. Container name comes from .env on the remote; we just
-# look up the first container whose label includes 'whatsapp'.
-echo ">>> Waiting for the container to become healthy..."
+# Wait for healthy. The compose project name is the directory name lowercased
+# (docker compose normalizes project names to lowercase). We filter docker ps
+# by that project so we never accidentally inspect the other service on the
+# same host.
+PROJECT_NAME=$(basename "$REPO_PATH" | tr '[:upper:]' '[:lower:]')
+echo ">>> Waiting for $PROJECT_NAME container to become healthy..."
 for i in {1..30}; do
-  STATUS=$(ssh "$SSH_TARGET" "docker ps --filter 'label=com.docker.compose.project=agentic-whatsapp' --filter 'label=com.docker.compose.service=whatsapp' --format '{{.Status}}' 2>/dev/null | grep -oE '\\(health[a-z]+\\)' | head -1" || echo "(starting)")
+  STATUS=$(ssh "$SSH_TARGET" "docker ps --filter 'label=com.docker.compose.project=$PROJECT_NAME' --format '{{.Status}}' 2>/dev/null | grep -oE '\\(health[a-z]+\\)' | head -1" || echo "(starting)")
   echo "  attempt $i: $STATUS"
   if [[ "$STATUS" == "(healthy)" ]]; then
     break
@@ -58,7 +61,7 @@ for i in {1..30}; do
 done
 
 echo ">>> Final status:"
-ssh "$SSH_TARGET" "docker ps --filter 'label=com.docker.compose.project=agentic-whatsapp' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
+ssh "$SSH_TARGET" "docker ps --filter 'label=com.docker.compose.project=$PROJECT_NAME' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
 echo ">>> /health response:"
 ssh "$SSH_TARGET" "curl -s http://localhost:$PORT/health || true"
 echo ""
