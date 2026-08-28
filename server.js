@@ -92,6 +92,8 @@ app.get('/status', (req, res) => {
  * pointed at /status, so a dead client still reported "healthy".
  */
 app.get('/health', (req, res) => {
+  // Health checks don't carry an API key, so we skip auth here. Clients
+  // that call the API directly should still use the apiKey middleware.
   const status = wa.getStatus();
   const initFailure = wa.getInitFailure();
 
