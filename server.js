@@ -66,10 +66,12 @@ function requireApiKey(req, res, next) {
 }
 
 app.use((req, res, next) => {
-  // `/qr/<apiKey>` (with optional image.png) and `/status` are public-ish (key in path for qr)
+  // `/qr/<apiKey>`, `/qr/<apiKey>/image.png`, `/status`, and `/health` are
+  // public-ish endpoints — no API key required.
   const isQr = req.method === 'GET' && /^\/qr\/[^/]+(\/image\.png)?\/?$/.test(req.path);
   const isStatus = req.method === 'GET' && req.path === '/status';
-  if (isQr || isStatus) return next();
+  const isHealth = req.method === 'GET' && req.path === '/health';
+  if (isQr || isStatus || isHealth) return next();
   return requireApiKey(req, res, next);
 });
 
