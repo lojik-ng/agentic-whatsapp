@@ -453,8 +453,19 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
     throw err;
   }
   const chatId = sanitizeRecipient(to);
-  const media = MessageMedia.fromBuffer(buffer, mimetype || 'application/octet-stream');
-  media.filename = filename || 'file';
+  // whatsapp-web.js's MessageMedia does not expose fromBuffer(). Construct
+  // via the public constructor signature (mimetype, base64-string, filename,
+  // filesize). The buffer comes from multer memoryStorage (req.file.buffer),
+  // so it's a real Node Buffer — toString('base64') gives the exact form the
+  // constructor expects.
+  const resolvedMimetype = mimetype || 'application/octet-stream';
+  const resolvedFilename = filename || 'file';
+  const media = new MessageMedia(
+    resolvedMimetype,
+    buffer.toString('base64'),
+    resolvedFilename,
+    buffer.length
+  );
   const options = {};
   if (caption) options.caption = caption;
   if (quotedMessageId) {
@@ -514,8 +525,14 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
     throw err;
   }
   const chatId = sanitizeRecipient(to);
-  const media = MessageMedia.fromBuffer(buffer, 'image/webp');
-  media.filename = 'sticker.webp';
+  // Same constructor pattern as sendMedia — see the comment there for why
+  // fromBuffer() doesn't exist on MessageMedia.
+  const media = new MessageMedia(
+    'image/webp',
+    buffer.toString('base64'),
+    'sticker.webp',
+    buffer.length
+  );
   const options = { sendStickerAsSticker: true, stickerMetadata: { author: 'agentic-whatsapp', keepScale: true } };
   if (quotedMessageId) {
     const quoted = await getMessageById(quotedMessageId);
@@ -1108,6 +1125,48 @@ async function sendReaction({ to, messageId, reaction }) {
   await waMsg.react(reaction || '');
   return { ok: true, messageId, reaction };
 }
+
+/**
+ * Startup assertion: construct a MessageMedia from a real Buffer and
+ * confirm the public API shape we depend on. The /send/media and
+ * /send/sticker handlers used to call `MessageMedia.fromBuffer(buffer,
+ * mimetype)` — a method that has never existed on whatsapp-web.js's
+ * public API. The first symptom was a 500 with "MessageMedia.fromBuffer
+ * is not a function" on every media send, which looked transient but
+ * was a hard code defect.
+ *
+ * Running this assertion at module load time surfaces a broken build
+ * at startup (process.exit(1) with a clear message) instead of at the
+ * first /send/media call. Cheap, deterministic, no Puppeteer involved.
+ */
+(function assertMessageMediaApi() {
+  try {
+    const probe = Buffer.from('probe');
+    const m = new MessageMedia('application/pdf', probe.toString('base64'), 'probe.pdf', probe.length);
+    if (m.mimetype !== 'application/pdf' || m.filesize !== probe.length) {
+      throw new Error(
+        `MessageMedia round-trip failed: mimetype=${m.mimetype} filesize=${m.filesize}`
+      );
+    }
+    if (typeof MessageMedia.fromBuffer === 'function') {
+      console.warn(
+        'MessageMedia.fromBuffer is present in this whatsapp-web.js version — ' +
+          'the legacy call site has been replaced with the public constructor. ' +
+          'No action needed; this is informational.'
+      );
+    }
+  } catch (err) {
+    console.error(
+      '[FATAL] MessageMedia API assertion failed at startup: ' +
+        (err && err.message ? err.message : String(err))
+    );
+    console.error(
+      '  This usually means whatsapp-web.js was upgraded and the constructor ' +
+        'signature changed. Pin the dependency and rebuild.'
+    );
+    process.exit(1);
+  }
+})();
 
 module.exports = {
   initWhatsApp,
