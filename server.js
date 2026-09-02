@@ -96,7 +96,7 @@ function sendErrorForSend(res, err) {
   const code = err && err.code ? err.code : 'INTERNAL';
   const status =
     code === 'LID_UNRESOLVED'          ? 422 :
-    code === 'PHONE_NOT_IN_CONTACTS'   ? 422 :
+    code === 'NO_LID_FOR_USER'         ? 422 :
     code === 'NOT_READY'               ? 503 :
     code === 'SEND_NO_MESSAGE'         ? 502 :
     500;
@@ -105,7 +105,7 @@ function sendErrorForSend(res, err) {
     error: err.message,
     code,
     retryable:
-      code !== 'LID_UNRESOLVED' && code !== 'PHONE_NOT_IN_CONTACTS',
+      code !== 'LID_UNRESOLVED' && code !== 'NO_LID_FOR_USER',
   });
 }
 

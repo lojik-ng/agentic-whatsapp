@@ -415,7 +415,7 @@ async function sendText({ to, body, quotedMessageId }) {
       maxAttempts: 3,
       baseDelayMs: 2000,
       shouldRetry: (err) =>
-        err.code !== 'LID_UNRESOLVED' && err.code !== 'PHONE_NOT_IN_CONTACTS',
+        err.code !== 'LID_UNRESOLVED' && err.code !== 'NO_LID_FOR_USER',
       onRetry: (attempt, err, delay) =>
         console.warn(`sendText retry ${attempt} after ${delay}ms: ${err.message}`),
     }
@@ -478,7 +478,7 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
       maxAttempts: 3,
       baseDelayMs: 2000,
       shouldRetry: (err) =>
-        err.code !== 'LID_UNRESOLVED' && err.code !== 'PHONE_NOT_IN_CONTACTS',
+        err.code !== 'LID_UNRESOLVED' && err.code !== 'NO_LID_FOR_USER',
       onRetry: (attempt, err, delay) =>
         console.warn(`sendMedia retry ${attempt} after ${delay}ms: ${err.message}`),
     }
@@ -538,7 +538,7 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
       maxAttempts: 3,
       baseDelayMs: 2000,
       shouldRetry: (err) =>
-        err.code !== 'LID_UNRESOLVED' && err.code !== 'PHONE_NOT_IN_CONTACTS',
+        err.code !== 'LID_UNRESOLVED' && err.code !== 'NO_LID_FOR_USER',
       onRetry: (attempt, err, delay) =>
         console.warn(`sendSticker retry ${attempt} after ${delay}ms: ${err.message}`),
     }
@@ -826,7 +826,37 @@ async function sendOnceWithAckRecovery({ chatId, content, options, contentKind }
     typeof content === 'string' ? content :
     (options && options.caption) || '';
 
-  const result = await client.sendMessage(resolved, content, options);
+  let result;
+  try {
+    result = await client.sendMessage(resolved, content, options);
+  } catch (err) {
+    // Tag the WA Web server-side errors that mean "this phone is not
+    // in your account's contact set" so the API layer can return a
+    // stable code. The raw error message is minified (e.g. "No LID for
+    // user\ns (https://static.whatsapp.net/rsrc.php/.../...js:84:180)")
+    // because it originates in the WA Web page context.
+    const msg = (err && err.message) || '';
+    if (
+      /No LID for user/i.test(msg) ||
+      /LID chat.*could not be resolved/i.test(msg) ||
+      /\(r\)/i.test(msg) ||
+      /\(t\)/i.test(msg)
+    ) {
+      const wrapped = new Error(
+        `WA Web rejected the send: phone "${chatId}" has no LID mapping ` +
+          `for this account. The recipient may not be in the linked ` +
+          `phone's contacts, or the WA Web session's contact cache is ` +
+          `stale. Re-link via /qr or POST /warmup, and verify the phone ` +
+          `is added to the linked phone's contacts.`
+      );
+      wrapped.code = 'NO_LID_FOR_USER';
+      wrapped.retryable = false;
+      wrapped.cause = err;
+      throw wrapped;
+    }
+    // Anything else is a real session/network failure — bubble as-is.
+    throw err;
+  }
   if (result !== null && result !== undefined) return result;
 
   // sendMessage returned no Message object. WA Web Multi-Device does
