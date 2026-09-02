@@ -237,7 +237,8 @@ Error semantics (applies to `/send/text`, `/send/reply`, `/send/media`):
 |--------|----------------|---------|--------|
 | 200    | (success)      | Message delivered to WA network. | Check `messageId`. |
 | 422    | `LID_UNRESOLVED` | Recipient is a LID that has never messaged this WhatsApp account. | Wait for the recipient to message first, or invite them out-of-band. Retrying won't help. |
-| 502    | `SEND_NO_MESSAGE` | `sendMessage` returned no message — session is stale or WA Web rejected the send. | Re-link via `/qr/<api-key>` or POST `/warmup`. Retrying may help. |
+| 422    | `PHONE_NOT_IN_CONTACTS` | Phone number is not in the linked phone's contact list — WA Web Multi-Device refuses to address the chat. | Add the number to the linked phone's contacts, wait ~1 minute for WA Web to sync, then retry. |
+| 502    | `SEND_NO_MESSAGE` | `sendMessage` returned no message AND no matching `message_ack` arrived within 5s — session is stale or WA Web rejected the send. | Re-link via `/qr/<api-key>` or POST `/warmup`. Retrying may help. |
 | 503    | `NOT_READY`     | Client is not in `READY` state. | Poll `/status` until `status:"READY"`, then retry. |
 | 500    | `INTERNAL`     | Unexpected error. | Check server logs. |
 

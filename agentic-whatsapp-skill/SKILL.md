@@ -412,7 +412,8 @@ worth it.
 | `400 "body" is required` | Empty body on `/send/text` | Provide a non-empty `body` |
 | `404 Message not found` | Wrong numeric id in `/messages/:id/...` | Re-fetch `/incoming-messages` to get a fresh id |
 | `422 {code:"LID_UNRESOLVED", retryable:false}` | Recipient is a LID chat that has never messaged this WhatsApp account | Do not retry. Wait for the recipient to message first, or invite them out-of-band. This is the expected outcome for a cold prospect. |
-| `502 {code:"SEND_NO_MESSAGE", retryable:true}` | `sendMessage` returned no message — session is stale or WA Web rejected the send | Call `POST /warmup` and retry. If the retry still fails, direct the user to re-link the device via `/qr/<api-key>` (WhatsApp → Settings → Linked Devices). |
+| `422 {code:"PHONE_NOT_IN_CONTACTS", retryable:false}` | Phone number is not in the linked phone's contact set — WA Web Multi-Device refuses to address the chat | Have the user add the number to the linked phone's contacts, wait ~1 minute for WA Web to sync, then retry. |
+| `502 {code:"SEND_NO_MESSAGE", retryable:true}` | `sendMessage` returned no message AND no matching `message_ack` arrived within 5s — session is stale or WA Web rejected the send | Call `POST /warmup` and retry. If the retry still fails, direct the user to re-link the device via `/qr/<api-key>` (WhatsApp → Settings → Linked Devices). |
 | `503 {code:"NOT_READY"}` | Client is not in `READY` state yet | Poll `/status` until `status:"READY"` AND `waContactCount > 0`. If `status:"READY"` but `waContactCount` stays at 0 for >30s, run `POST /warmup`; if still 0, the session is stale — re-link via QR. |
 | `500 {code:"INTERNAL"}` | Unexpected error | Surface the body to the user; check server logs. |
 | Connection refused / DNS error | Wrong `WHATSAPP_API_URL` or container down | Confirm URL with user |

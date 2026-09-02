@@ -152,6 +152,13 @@ function initWhatsApp({ sessionPath }) {
         timestamp: Date.now(),
         raw: { ack },
       });
+      // Also notify any in-flight send waiter that this ack matches.
+      // Used by the "sendMessage returned null" recovery path — see
+      // waitForMatchingAck / notifyMatchingAck.
+      if (msg.fromMe && msg.to && typeof msg.body === 'string') {
+        const ackMessageId = serializeMessageId(msg.id);
+        notifyMatchingAck({ chatId: msg.to, body: msg.body, messageId: ackMessageId });
+      }
     } catch (err) {
       console.error('Failed to record message ack:', err);
     }
@@ -396,33 +403,19 @@ async function sendText({ to, body, quotedMessageId }) {
   }
 
   const sent = await retryWithBackoff(
-    async (attempt) => {
-      // Re-resolve the LID on every retry — the contact cache may have
-      // populated since the last attempt (e.g. the cron sent a different
-      // message to the same chat, or the chat was warmed by a different
-      // process).
-      const resolved = await resolveLidToPhoneChatId(chatId);
-      const result = await client.sendMessage(resolved, body, options);
-      // whatsapp-web.js resolves to `null` (without throwing) when the
-      // session has been silently dropped, when the recipient has no LID
-      // mapping for this account, or when the network round-trip is
-      // interrupted mid-flight. We surface it as an explicit error so the
-      // caller learns the send did not happen — the previous behaviour
-      // returned HTTP 200 with `message: null`, which masked the failure.
-      if (result === null || result === undefined) {
-        const e = new Error(
-          'sendMessage returned no message — session may be stale; re-link the device via /qr or POST /warmup'
-        );
-        e.code = 'SEND_NO_MESSAGE';
-        e.retryable = true;
-        throw e;
-      }
-      return result;
+    async () => {
+      return sendOnceWithAckRecovery({
+        chatId,
+        content: body,
+        options,
+        contentKind: 'text',
+      });
     },
     {
       maxAttempts: 3,
       baseDelayMs: 2000,
-      shouldRetry: (err) => err.code !== 'LID_UNRESOLVED', // cold LID is never going to fix itself by retry
+      shouldRetry: (err) =>
+        err.code !== 'LID_UNRESOLVED' && err.code !== 'PHONE_NOT_IN_CONTACTS',
       onRetry: (attempt, err, delay) =>
         console.warn(`sendText retry ${attempt} after ${delay}ms: ${err.message}`),
     }
@@ -474,23 +467,18 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
 
   const sent = await retryWithBackoff(
     async () => {
-      const resolved = await resolveLidToPhoneChatId(chatId);
-      const result = await client.sendMessage(resolved, media, options);
-      // See sendText for why null/undefined is treated as an error.
-      if (result === null || result === undefined) {
-        const e = new Error(
-          'sendMessage (media) returned no message — session may be stale; re-link via /qr or POST /warmup'
-        );
-        e.code = 'SEND_NO_MESSAGE';
-        e.retryable = true;
-        throw e;
-      }
-      return result;
+      return sendOnceWithAckRecovery({
+        chatId,
+        content: media,
+        options,
+        contentKind: 'image',
+      });
     },
     {
       maxAttempts: 3,
       baseDelayMs: 2000,
-      shouldRetry: (err) => err.code !== 'LID_UNRESOLVED',
+      shouldRetry: (err) =>
+        err.code !== 'LID_UNRESOLVED' && err.code !== 'PHONE_NOT_IN_CONTACTS',
       onRetry: (attempt, err, delay) =>
         console.warn(`sendMedia retry ${attempt} after ${delay}ms: ${err.message}`),
     }
@@ -539,23 +527,18 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
 
   const sent = await retryWithBackoff(
     async () => {
-      const resolved = await resolveLidToPhoneChatId(chatId);
-      const result = await client.sendMessage(resolved, media, options);
-      // See sendText for why null/undefined is treated as an error.
-      if (result === null || result === undefined) {
-        const e = new Error(
-          'sendMessage (sticker) returned no message — session may be stale; re-link via /qr or POST /warmup'
-        );
-        e.code = 'SEND_NO_MESSAGE';
-        e.retryable = true;
-        throw e;
-      }
-      return result;
+      return sendOnceWithAckRecovery({
+        chatId,
+        content: media,
+        options,
+        contentKind: 'sticker',
+      });
     },
     {
       maxAttempts: 3,
       baseDelayMs: 2000,
-      shouldRetry: (err) => err.code !== 'LID_UNRESOLVED',
+      shouldRetry: (err) =>
+        err.code !== 'LID_UNRESOLVED' && err.code !== 'PHONE_NOT_IN_CONTACTS',
       onRetry: (attempt, err, delay) =>
         console.warn(`sendSticker retry ${attempt} after ${delay}ms: ${err.message}`),
     }
@@ -713,6 +696,157 @@ async function resolveLidToPhoneChatId(chatId) {
   } catch (_) { /* non-fatal — DB write failures must not block sends */ }
 
   return resolved;
+}
+
+/**
+ * Active phone → chatId resolver. Calls `client.getNumberId(phone)` —
+ * the official WA Web method that returns `{ _serialized, user, server }`
+ * for phone numbers this account has a LID mapping for, or `null` when
+ * the phone is not in the linked phone's contact list.
+ *
+ * Why this exists: in WA Web Multi-Device (post-2024), `client.sendMessage`
+ * resolves to `null` (without throwing) when given a phone number that
+ * has no LID mapping for the current account. The message *still goes
+ * out* — WA's server delivers it and fires a `message_ack` event — but
+ * the wrapper has no messageId to return. Pre-resolving the phone via
+ * `getNumberId` lets us catch the "phone not in your contacts" case up
+ * front (return 422) AND lets us send to the resolved LID when we have
+ * one, which makes the response reliable.
+ *
+ * Returns null when the phone is unknown — caller should treat as
+ * `PHONE_NOT_IN_CONTACTS`. Throws only on hard errors.
+ */
+async function resolvePhoneToChatId(phoneNumber) {
+  if (!client || !isClientReady()) return null;
+  try {
+    const numberId = await client.getNumberId(phoneNumber);
+    if (numberId && typeof numberId._serialized === 'string') {
+      return numberId._serialized;
+    }
+    return null;
+  } catch (_) {
+    return null; // getNumberId sometimes throws for unknown numbers; treat as unknown
+  }
+}
+
+/**
+ * Wait briefly for a `message_ack` event matching `chatId`+`body`.
+ *
+ * Used after `client.sendMessage()` resolves to `null`/`undefined` to
+ * recover the real `messageId` from the ack event that WA Web fires once
+ * the message has been delivered to its server. This is the "phone not
+ * in contacts" case where sendMessage returns no value but the message
+ * still goes out.
+ *
+ * Correlation is best-effort: matches on `msg.to === chatId && msg.body === body
+ * && msg.fromMe === true` for any ack arriving within `timeoutMs`. Two
+ * concurrent identical sends to the same chat would race; the first ack
+ * we see wins. For the wrapper's use case (1–2 sends per minute per
+ * operator) this is reliable enough.
+ *
+ * Returns the ack event's serialized messageId, or null if no match
+ * arrives in time.
+ */
+let pendingAckWaiters = []; // [{ chatId, body, resolve, timer }]
+function waitForMatchingAck({ chatId, body, timeoutMs = 5000 }) {
+  return new Promise((resolve) => {
+    const entry = { chatId, body, resolve, timer: null };
+    entry.timer = setTimeout(() => {
+      // Remove this waiter; resolve with null.
+      pendingAckWaiters = pendingAckWaiters.filter((w) => w !== entry);
+      resolve(null);
+    }, timeoutMs);
+    pendingAckWaiters.push(entry);
+  });
+}
+
+// Called from the `message_ack` event handler. Resolves the first waiter
+// whose chatId+body match the ack.
+function notifyMatchingAck({ chatId, body, messageId }) {
+  if (pendingAckWaiters.length === 0) return;
+  const idx = pendingAckWaiters.findIndex(
+    (w) => w.chatId === chatId && w.body === body
+  );
+  if (idx === -1) return;
+  const waiter = pendingAckWaiters[idx];
+  pendingAckWaiters.splice(idx, 1);
+  clearTimeout(waiter.timer);
+  waiter.resolve(messageId);
+}
+
+/**
+ * Resolve a chatId to its send-target form and run one send attempt.
+ * Shared by sendText/sendMedia/sendSticker so the multi-device quirk
+ * (sendMessage returns null but the message goes out) is handled in
+ * exactly one place.
+ *
+ * Behaviour:
+ *   - Phone-format input: pre-resolve via client.getNumberId. If the
+ *     account has no LID mapping, throw PHONE_NOT_IN_CONTACTS (422).
+ *     Otherwise send to the resolved chatId.
+ *   - LID input: resolveLidToPhoneChatId (cache + getChatById fallback).
+ *     Throws LID_UNRESOLVED (422) for genuinely cold LIDs.
+ *   - sendMessage returning null: wait up to 5s for a matching ack. If
+ *     one arrives, synthesize a Message-like object with the real
+ *     messageId so the rest of the pipeline records it. If no ack in
+ *     5s, throw SEND_NO_MESSAGE (502) — the message may still arrive
+ *     but we can't confirm.
+ */
+async function sendOnceWithAckRecovery({ chatId, content, options, contentKind }) {
+  let resolved = chatId;
+  if (chatId.endsWith('@c.us') || (!chatId.includes('@') && /^\+?\d+$/.test(chatId))) {
+    const viaNumber = await resolvePhoneToChatId(chatId);
+    if (viaNumber) {
+      resolved = viaNumber;
+    } else {
+      const e = new Error(
+        `Phone "${chatId}" is not in this WhatsApp account's contact set. ` +
+          `Add the number to the linked phone's contacts (then wait ~1 minute ` +
+          `for WA Web to sync) and retry.`
+      );
+      e.code = 'PHONE_NOT_IN_CONTACTS';
+      e.retryable = false;
+      throw e;
+    }
+  } else if (chatId.endsWith('@lid')) {
+    resolved = await resolveLidToPhoneChatId(chatId);
+  }
+  // contentKind === 'text' uses `body` as the ack-correlation key;
+  // media/sticker use `caption` (which may be null) — fall back to a
+  // empty-string correlation in that case (acks for media still carry
+  // the caption as msg.body).
+  const correlationKey =
+    contentKind === 'text' ? options.bodyForAck || content :
+    typeof content === 'string' ? content :
+    (options && options.caption) || '';
+
+  const result = await client.sendMessage(resolved, content, options);
+  if (result !== null && result !== undefined) return result;
+
+  const ackMessageId = await waitForMatchingAck({
+    chatId: resolved,
+    body: correlationKey,
+    timeoutMs: 5000,
+  });
+  if (ackMessageId) {
+    return {
+      messageId: ackMessageId,
+      to: resolved,
+      from: 'me',
+      body: correlationKey,
+      type: contentKind === 'text' ? 'chat' : contentKind,
+      timestamp: Math.floor(Date.now() / 1000),
+      ack: 1,
+      _synthesizedFromAck: true,
+    };
+  }
+  const e = new Error(
+    `sendMessage (${contentKind}) returned no message and no matching ack arrived ` +
+      `within 5s — session may be stale; re-link via /qr or POST /warmup`
+  );
+  e.code = 'SEND_NO_MESSAGE';
+  e.retryable = true;
+  throw e;
 }
 
 /**

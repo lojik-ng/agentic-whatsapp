@@ -95,15 +95,17 @@ app.use((req, res, next) => {
 function sendErrorForSend(res, err) {
   const code = err && err.code ? err.code : 'INTERNAL';
   const status =
-    code === 'LID_UNRESOLVED' ? 422 :
-    code === 'NOT_READY'      ? 503 :
-    code === 'SEND_NO_MESSAGE'? 502 :
+    code === 'LID_UNRESOLVED'          ? 422 :
+    code === 'PHONE_NOT_IN_CONTACTS'   ? 422 :
+    code === 'NOT_READY'               ? 503 :
+    code === 'SEND_NO_MESSAGE'         ? 502 :
     500;
   res.status(status).json({
     ok: false,
     error: err.message,
     code,
-    retryable: code !== 'LID_UNRESOLVED',
+    retryable:
+      code !== 'LID_UNRESOLVED' && code !== 'PHONE_NOT_IN_CONTACTS',
   });
 }
 
