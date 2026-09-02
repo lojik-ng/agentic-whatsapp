@@ -794,19 +794,25 @@ function notifyMatchingAck({ chatId, body, messageId }) {
  */
 async function sendOnceWithAckRecovery({ chatId, content, options, contentKind }) {
   let resolved = chatId;
+  let phoneNotInContacts = false;
   if (chatId.endsWith('@c.us') || (!chatId.includes('@') && /^\+?\d+$/.test(chatId))) {
+    // Phone-format input — try client.getNumberId() to get a reliable
+    // @c.us id. If the account has no LID mapping, getNumberId returns
+    // null. We DO NOT reject the send in that case: WA Web Multi-Device
+    // will still deliver the message (and fire message_ack) — it just
+    // doesn't give us a Message object back. The ack-correlation
+    // window below recovers the real messageId when the message
+    // actually went out.
     const viaNumber = await resolvePhoneToChatId(chatId);
     if (viaNumber) {
       resolved = viaNumber;
     } else {
-      const e = new Error(
-        `Phone "${chatId}" is not in this WhatsApp account's contact set. ` +
-          `Add the number to the linked phone's contacts (then wait ~1 minute ` +
-          `for WA Web to sync) and retry.`
+      phoneNotInContacts = true;
+      // Log but don't throw — let sendMessage try anyway.
+      console.warn(
+        `[${contentKind}] phone ${chatId} is not in this WA account's ` +
+          `contact set; attempting send anyway and waiting for ack`
       );
-      e.code = 'PHONE_NOT_IN_CONTACTS';
-      e.retryable = false;
-      throw e;
     }
   } else if (chatId.endsWith('@lid')) {
     resolved = await resolveLidToPhoneChatId(chatId);
@@ -823,10 +829,14 @@ async function sendOnceWithAckRecovery({ chatId, content, options, contentKind }
   const result = await client.sendMessage(resolved, content, options);
   if (result !== null && result !== undefined) return result;
 
+  // sendMessage returned no Message object. WA Web Multi-Device does
+  // this for phone-format recipients where there's no LID mapping for
+  // this account — the message often still goes out, and a
+  // message_ack event fires ~1–10 seconds later. Wait for it.
   const ackMessageId = await waitForMatchingAck({
     chatId: resolved,
     body: correlationKey,
-    timeoutMs: 5000,
+    timeoutMs: 10000,
   });
   if (ackMessageId) {
     return {
@@ -838,11 +848,13 @@ async function sendOnceWithAckRecovery({ chatId, content, options, contentKind }
       timestamp: Math.floor(Date.now() / 1000),
       ack: 1,
       _synthesizedFromAck: true,
+      _phoneNotInContacts: phoneNotInContacts || undefined,
     };
   }
   const e = new Error(
-    `sendMessage (${contentKind}) returned no message and no matching ack arrived ` +
-      `within 5s — session may be stale; re-link via /qr or POST /warmup`
+    `sendMessage (${contentKind}) returned no message and no matching ack ` +
+      `arrived within 10s — message may not have been delivered; check ` +
+      `/incoming-messages for the recipient's reply to confirm`
   );
   e.code = 'SEND_NO_MESSAGE';
   e.retryable = true;
