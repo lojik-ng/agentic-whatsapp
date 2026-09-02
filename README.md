@@ -231,6 +231,42 @@ Response:
 }}
 ```
 
+Error semantics (applies to `/send/text`, `/send/reply`, `/send/media`):
+
+| Status | `code` in body | Meaning | Action |
+|--------|----------------|---------|--------|
+| 200    | (success)      | Message delivered to WA network. | Check `messageId`. |
+| 422    | `LID_UNRESOLVED` | Recipient is a LID that has never messaged this WhatsApp account. | Wait for the recipient to message first, or invite them out-of-band. Retrying won't help. |
+| 502    | `SEND_NO_MESSAGE` | `sendMessage` returned no message — session is stale or WA Web rejected the send. | Re-link via `/qr/<api-key>` or POST `/warmup`. Retrying may help. |
+| 503    | `NOT_READY`     | Client is not in `READY` state. | Poll `/status` until `status:"READY"`, then retry. |
+| 500    | `INTERNAL`     | Unexpected error. | Check server logs. |
+
+The previous contract returned HTTP 200 with `message: null` whenever
+`sendMessage` silently resolved to no value — that hid real outages behind
+a misleading "ok". The new contract surfaces every failure mode as a
+distinct status + code.
+
+### `POST /warmup` — *authenticated*
+
+Force WhatsApp Web to load all contacts into its in-memory map. The WA-side
+contact store starts empty after every fresh READY; without warm-up, the
+first round of outbound sends pays a slow page round-trip per recipient
+and produces intermittent `No LID for user` errors.
+
+```bash
+curl -H "x-api-key: $WHATS...KEY" -X POST http://localhost:3056/warmup
+```
+
+Response:
+
+```json
+{ "ok": true, "contactCount": 247, "lidCacheSize": 0 }
+```
+
+Idempotent. Safe to call any time the client is `READY`. The server also
+calls this automatically on every fresh `READY` event, so this endpoint is
+mostly useful as a manual kick after a known-cold start or after re-pairing.
+
 ### `POST /send/reply` — *authenticated*
 
 Reply to a specific message — alias of `/send/text` with the quote id required.

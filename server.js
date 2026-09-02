@@ -75,6 +75,38 @@ app.use((req, res, next) => {
   return requireApiKey(req, res, next);
 });
 
+/**
+ * Map an internal whatsapp.js error to an HTTP status + structured payload.
+ *
+ * Cold LID ("recipient has never messaged this account")  → 422 — retrying
+ *   is pointless; the operator has to wait for the recipient to message first.
+ * Session not ready / WA Web not authenticated             → 503 — transient,
+ *   retryable once the client is back to READY.
+ * sendMessage silently returned null                       → 502 — the
+ *   wrapper's signal that something went wrong server-side and the message
+ *   did not reach the network.
+ * Anything else                                            → 500 — internal.
+ *
+ * The previous contract returned HTTP 500 with the raw `err.message`, which
+ * forced every caller to do its own error-code parsing. With this helper,
+ * the body always carries a stable `code` and a human `error`; the HTTP
+ * status tells the caller what to do (retry vs. give up vs. re-link).
+ */
+function sendErrorForSend(res, err) {
+  const code = err && err.code ? err.code : 'INTERNAL';
+  const status =
+    code === 'LID_UNRESOLVED' ? 422 :
+    code === 'NOT_READY'      ? 503 :
+    code === 'SEND_NO_MESSAGE'? 502 :
+    500;
+  res.status(status).json({
+    ok: false,
+    error: err.message,
+    code,
+    retryable: code !== 'LID_UNRESOLVED',
+  });
+}
+
 // ===== Public endpoints =====
 
 /**
@@ -100,13 +132,26 @@ app.get('/health', (req, res) => {
   const initFailure = wa.getInitFailure();
 
   // Waiting for a QR scan or still starting up is not a failure.
-  const healthy =
+  const stateOk =
     !initFailure &&
     ['READY', 'AUTHENTICATED', 'INITIALIZING'].includes(status.status);
+
+  // Degraded: client claims READY but the WA-side contact store is still
+  // empty. This is the condition that produces "No LID for user" for
+  // outbound sends. We surface it as 503 with a `degraded` reason so an
+  // operator or a Kubernetes probe can distinguish "session is broken"
+  // from "session is fine, just warming up".
+  let degraded = null;
+  if (status.status === 'READY' && status.waContactCount === 0) {
+    degraded = 'wa_contact_store_empty';
+  }
+
+  const healthy = stateOk && !degraded;
 
   res.status(healthy ? 200 : 503).json({
     healthy,
     ...status,
+    ...(degraded ? { degraded, degradedReason: degraded } : {}),
     ...(initFailure ? { initFailure } : {}),
   });
 });
@@ -254,9 +299,20 @@ app.post('/send/text', async (req, res) => {
     if (!body) return res.status(400).json({ error: '"body" is required' });
 
     const sent = await wa.sendText({ to, body, quotedMessageId });
+    if (!sent) {
+      // Should never happen — sendText now throws on null — but defend in
+      // depth so a future regression doesn't reintroduce the silent-fail
+      // bug where HTTP 200 + message:null hid a real outage.
+      return res.status(502).json({
+        ok: false,
+        error: 'sendMessage returned no message (defensive — should be unreachable)',
+        code: 'SEND_NO_MESSAGE',
+        retryable: true,
+      });
+    }
     res.json({ ok: true, message: sent });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    sendErrorForSend(res, err);
   }
 });
 
@@ -361,6 +417,42 @@ app.post('/cache/clear', async (req, res) => {
 });
 
 /**
+ * POST /warmup  — force the WA Web client to load all contacts into its
+ * in-memory map.
+ *
+ *   The contact map is what powers `client.getContact(LID)`. When it is
+ *   empty (right after a fresh READY), the first round of sends pays a
+ *   slow page round-trip per recipient — and "No LID for user" errors are
+ *   reported in the meantime. Warming the cache up-front avoids both.
+ *
+ *   Idempotent. Safe to call any time the client is READY.
+ *
+ *   Returns:
+ *     { ok: true, contactCount: <number>, lidCacheSize: <number> }
+ *
+ *   If the client isn't READY yet, returns 503 — caller can retry.
+ */
+app.post('/warmup', async (req, res) => {
+  try {
+    if (!wa.isClientReady()) {
+      return res.status(503).json({
+        ok: false,
+        error: 'WhatsApp client is not ready — wait for /status to report READY',
+        code: 'NOT_READY',
+      });
+    }
+    const count = await wa.warmContactCache();
+    res.json({
+      ok: true,
+      contactCount: count,
+      lidCacheSize: wa.contactCache.size(),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
  * POST /send/reply  — reply to a specific message (alias of /send/text with quotedMessageId).
  *   Body: { to: string, body: string, quotedMessageId: string }
  */
@@ -371,9 +463,17 @@ app.post('/send/reply', async (req, res) => {
       return res.status(400).json({ error: '"to", "body" and "quotedMessageId" are required' });
     }
     const sent = await wa.replyToMessage({ to, body, quotedMessageId });
+    if (!sent) {
+      return res.status(502).json({
+        ok: false,
+        error: 'sendMessage returned no message',
+        code: 'SEND_NO_MESSAGE',
+        retryable: true,
+      });
+    }
     res.json({ ok: true, message: sent });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    sendErrorForSend(res, err);
   }
 });
 
@@ -403,9 +503,17 @@ app.post('/send/media', upload.single('media'), async (req, res) => {
       sent = await wa.sendMedia({ to, buffer, mimetype, filename, caption, type, quotedMessageId });
     }
 
+    if (!sent) {
+      return res.status(502).json({
+        ok: false,
+        error: 'sendMessage returned no message',
+        code: 'SEND_NO_MESSAGE',
+        retryable: true,
+      });
+    }
     res.json({ ok: true, message: sent });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    sendErrorForSend(res, err);
   }
 });
 

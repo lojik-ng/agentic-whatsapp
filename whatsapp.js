@@ -109,6 +109,16 @@ function initWhatsApp({ sessionPath }) {
   client.on('ready', () => {
     readyAt = Date.now();
     setStatus('READY');
+    // After READY, warm the WA-side contact store in the background. The
+    // store is empty until something asks for it, and the first round of
+    // sends after a fresh start is the worst time to discover that — every
+    // outbound `getContact(LID)` becomes a slow page round-trip. We fire
+    // and forget; failures are logged but never block startup.
+    setImmediate(() => {
+      warmContactCache()
+        .then((count) => console.log(`warmed WA contact store (${count} contacts)`))
+        .catch((err) => console.warn('warmContactCache failed:', err.message));
+    });
   });
 
   client.on('disconnected', (reason) => {
@@ -269,6 +279,12 @@ function getStatus() {
     hasQr: !!currentQr,
     lastEventAt: internalStatus.lastEventAt,
     contactCacheSize: contactCache.size(),
+    waContactCount,
+    // `lidCacheSize` is the public alias for the in-memory LID → phone
+    // resolution cache. The two names exist because operators diagnose
+    // the failure as "LID cache empty" while the implementation stores
+    // it as `contactCacheSize`. Both are kept for backward compatibility.
+    lidCacheSize: contactCache.size(),
     ...(initFailure ? { initError: initFailure.message } : {}),
   };
 }
@@ -364,7 +380,11 @@ async function retryWithBackoff(fn, { maxAttempts = 3, baseDelayMs = 2000, shoul
  * still populating) self-heal without surfacing to the caller.
  */
 async function sendText({ to, body, quotedMessageId }) {
-  if (!isClientReady()) throw new Error('WhatsApp client is not ready');
+  if (!isClientReady()) {
+    const err = new Error('WhatsApp client is not ready');
+    err.code = 'NOT_READY';
+    throw err;
+  }
   let chatId = sanitizeRecipient(to);
   const options = {};
   if (quotedMessageId) {
@@ -382,11 +402,27 @@ async function sendText({ to, body, quotedMessageId }) {
       // message to the same chat, or the chat was warmed by a different
       // process).
       const resolved = await resolveLidToPhoneChatId(chatId);
-      return client.sendMessage(resolved, body, options);
+      const result = await client.sendMessage(resolved, body, options);
+      // whatsapp-web.js resolves to `null` (without throwing) when the
+      // session has been silently dropped, when the recipient has no LID
+      // mapping for this account, or when the network round-trip is
+      // interrupted mid-flight. We surface it as an explicit error so the
+      // caller learns the send did not happen — the previous behaviour
+      // returned HTTP 200 with `message: null`, which masked the failure.
+      if (result === null || result === undefined) {
+        const e = new Error(
+          'sendMessage returned no message — session may be stale; re-link the device via /qr or POST /warmup'
+        );
+        e.code = 'SEND_NO_MESSAGE';
+        e.retryable = true;
+        throw e;
+      }
+      return result;
     },
     {
       maxAttempts: 3,
       baseDelayMs: 2000,
+      shouldRetry: (err) => err.code !== 'LID_UNRESOLVED', // cold LID is never going to fix itself by retry
       onRetry: (attempt, err, delay) =>
         console.warn(`sendText retry ${attempt} after ${delay}ms: ${err.message}`),
     }
@@ -418,7 +454,11 @@ async function sendText({ to, body, quotedMessageId }) {
  * Send media from a Buffer or file path.
  */
 async function sendMedia({ to, buffer, mimetype, filename, caption, type, quotedMessageId }) {
-  if (!isClientReady()) throw new Error('WhatsApp client is not ready');
+  if (!isClientReady()) {
+    const err = new Error('WhatsApp client is not ready');
+    err.code = 'NOT_READY';
+    throw err;
+  }
   const chatId = sanitizeRecipient(to);
   const media = MessageMedia.fromBuffer(buffer, mimetype || 'application/octet-stream');
   media.filename = filename || 'file';
@@ -435,11 +475,22 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
   const sent = await retryWithBackoff(
     async () => {
       const resolved = await resolveLidToPhoneChatId(chatId);
-      return client.sendMessage(resolved, media, options);
+      const result = await client.sendMessage(resolved, media, options);
+      // See sendText for why null/undefined is treated as an error.
+      if (result === null || result === undefined) {
+        const e = new Error(
+          'sendMessage (media) returned no message — session may be stale; re-link via /qr or POST /warmup'
+        );
+        e.code = 'SEND_NO_MESSAGE';
+        e.retryable = true;
+        throw e;
+      }
+      return result;
     },
     {
       maxAttempts: 3,
       baseDelayMs: 2000,
+      shouldRetry: (err) => err.code !== 'LID_UNRESOLVED',
       onRetry: (attempt, err, delay) =>
         console.warn(`sendMedia retry ${attempt} after ${delay}ms: ${err.message}`),
     }
@@ -469,7 +520,11 @@ async function sendMedia({ to, buffer, mimetype, filename, caption, type, quoted
  * Send a sticker from a webp file.
  */
 async function sendSticker({ to, buffer, quotedMessageId }) {
-  if (!isClientReady()) throw new Error('WhatsApp client is not ready');
+  if (!isClientReady()) {
+    const err = new Error('WhatsApp client is not ready');
+    err.code = 'NOT_READY';
+    throw err;
+  }
   const chatId = sanitizeRecipient(to);
   const media = MessageMedia.fromBuffer(buffer, 'image/webp');
   media.filename = 'sticker.webp';
@@ -485,11 +540,22 @@ async function sendSticker({ to, buffer, quotedMessageId }) {
   const sent = await retryWithBackoff(
     async () => {
       const resolved = await resolveLidToPhoneChatId(chatId);
-      return client.sendMessage(resolved, media, options);
+      const result = await client.sendMessage(resolved, media, options);
+      // See sendText for why null/undefined is treated as an error.
+      if (result === null || result === undefined) {
+        const e = new Error(
+          'sendMessage (sticker) returned no message — session may be stale; re-link via /qr or POST /warmup'
+        );
+        e.code = 'SEND_NO_MESSAGE';
+        e.retryable = true;
+        throw e;
+      }
+      return result;
     },
     {
       maxAttempts: 3,
       baseDelayMs: 2000,
+      shouldRetry: (err) => err.code !== 'LID_UNRESOLVED',
       onRetry: (attempt, err, delay) =>
         console.warn(`sendSticker retry ${attempt} after ${delay}ms: ${err.message}`),
     }
@@ -617,11 +683,19 @@ async function resolveLidToPhoneChatId(chatId) {
       await client.getChatById(chatId);
       resolved = chatId;
     } catch (err) {
-      throw new Error(
+      // Cold LID: the recipient has never messaged this WhatsApp account,
+      // so WA Web has no contact mapping and cannot load the chat. This is
+      // NOT a session/bug condition — the operator must wait for the
+      // recipient to message first, or invite them out-of-band. Tag with a
+      // stable error code so the HTTP layer can return 422 instead of 500.
+      const e = new Error(
         `LID chat "${chatId}" could not be resolved: contact unknown and chat ` +
-        `could not be loaded (${err.message}). The recipient has likely never ` +
-        `messaged this WhatsApp account.`
+          `could not be loaded (${err.message}). The recipient has likely never ` +
+          `messaged this WhatsApp account.`
       );
+      e.code = 'LID_UNRESOLVED';
+      e.retryable = false;
+      throw e;
     }
   }
 
@@ -656,6 +730,49 @@ async function warmChat(chatId) {
   } catch (err) {
     return { ok: false, chatId, error: err.message };
   }
+}
+
+/**
+ * Warm the WhatsApp-side contact store by pulling all contacts into the
+ * client's in-memory map. Without this, the first `client.getContact(LID)`
+ * after a fresh READY is the round-trip that the user pays; after warm-up,
+ * every contact lookup is an in-memory hit.
+ *
+ * Returns the number of contacts loaded. Safe to call any time the client
+ * is READY; idempotent (re-calling just refreshes).
+ */
+let warmContactCachePromise = null;
+let waContactCount = 0; // updated each time warmContactCache resolves
+async function warmContactCache() {
+  if (!isClientReady()) return 0;
+  // Coalesce concurrent calls — multiple routes asking for warm-up at once
+  // should hit the same round-trip, not stampede the WA Web page.
+  if (warmContactCachePromise) return warmContactCachePromise;
+  warmContactCachePromise = (async () => {
+    try {
+      const contacts = await client.getContacts();
+      waContactCount = Array.isArray(contacts) ? contacts.length : 0;
+      return waContactCount;
+    } catch (err) {
+      warmContactCachePromise = null; // allow a retry after a failure
+      throw err;
+    } finally {
+      // Resolve the in-flight promise but clear the slot only after a delay
+      // so back-to-back callers within the same second share the result.
+      setTimeout(() => { warmContactCachePromise = null; }, 1000);
+    }
+  })();
+  return warmContactCachePromise;
+}
+
+/**
+ * Best-effort count of contacts WA Web has loaded in its in-memory map.
+ * Returns the cached count from the last successful warmContactCache call;
+ * falls back to 0 if warm-up hasn't run yet (which is also the right
+ * answer — the WA-side store really is empty until warm-up completes).
+ */
+function getContactCount() {
+  return waContactCount;
 }
 
 /**
@@ -752,7 +869,11 @@ async function fetchMessageMediaByMessageId(messageId) {
  * `WAWebChatLoadMessages` when the requested limit exceeds what's cached.
  */
 async function fetchChatMessages({ phone, limit = 50, fromMe = null }) {
-  if (!isClientReady()) throw new Error('WhatsApp client is not ready');
+  if (!isClientReady()) {
+    const err = new Error('WhatsApp client is not ready');
+    err.code = 'NOT_READY';
+    throw err;
+  }
 
   const chatId = sanitizeRecipient(phone);
   const chat = await client.getChatById(chatId);
@@ -798,7 +919,11 @@ async function getMessageById(id) {
  * Send a reaction emoji to a message.
  */
 async function sendReaction({ to, messageId, reaction }) {
-  if (!isClientReady()) throw new Error('WhatsApp client is not ready');
+  if (!isClientReady()) {
+    const err = new Error('WhatsApp client is not ready');
+    err.code = 'NOT_READY';
+    throw err;
+  }
   // `to` is omitted (null/undefined) for reactions — the reaction is applied to
   // the message's own chat, not sent to a separate recipient.
   const chatId = to ? sanitizeRecipient(to) : null;
@@ -825,6 +950,8 @@ module.exports = {
   fetchMessageMediaByMessageId,
   resolveLidToPhoneChatId,
   warmChat,
+  warmContactCache,
+  getContactCount,
   fetchChatMessages,
   serializeMessage,
   contactCache,
