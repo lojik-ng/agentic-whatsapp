@@ -107,6 +107,42 @@ Response fields:
 | `readySince` | Unix-ms when `READY` was first reached (else `null`) |
 | `hasQr` | `true` when a QR code is currently being shown |
 | `lastEventAt` | Unix-ms of the most recent state change |
+| `contactCacheSize` | In-memory LID → phone cache size (legacy name) |
+| `lidCacheSize` | Same value as `contactCacheSize` — public alias because operators diagnose the failure as "LID cache empty" |
+| `waContactCount` | Size of the WhatsApp-side contact store, populated automatically on every fresh `READY` event. `0` after `READY` for more than a few seconds indicates a stale session — see `/warmup` below. |
+
+### 4.1b `GET /health` — *public*
+
+A Kubernetes-style liveness probe, distinct from `/status`. The body shape
+is the same as `/status` with two extras:
+
+- `healthy` — `true` when the client is `READY` (or warming up) AND the
+  WA-side contact store is non-empty. `false` (with HTTP 503) when the
+  client claims `READY` but `waContactCount === 0` (this is the
+  "stale session" symptom that produces `No LID for user` on sends).
+- `degraded` — string code when `healthy` is `false`. Currently the only
+  value is `"wa_contact_store_empty"`.
+
+```bash
+curl -fsS "$WHATSAPP_API_URL/health"    # exit 0 = healthy, non-zero = degraded
+```
+
+### 4.1c `POST /warmup` — *authenticated*
+
+Force the WA Web client to load all contacts into its in-memory map. The
+WA-side contact store starts empty after every fresh `READY`; without
+warm-up, the first round of outbound sends pays a slow page round-trip per
+recipient and produces intermittent `No LID for user` errors. The server
+runs this automatically on every `READY` event — this endpoint is mostly
+useful as a manual kick after a known-cold start, after re-pairing, or to
+silence a `/health` `degraded` flag.
+
+```bash
+curl -s -X POST -H "x-api-key: $WHATSAPP_API_KEY" "$WHATSAPP_API_URL/warmup"
+# → { "ok": true, "contactCount": 247, "lidCacheSize": 0 }
+```
+
+Idempotent. Returns `503 {code:"NOT_READY"}` if the client isn't `READY` yet.
 
 ### 4.2 `GET /incoming-messages` — *authenticated*
 
@@ -363,16 +399,28 @@ echo "Authenticated phone: $my_phone"
 
 ## 6. Error handling
 
+The send endpoints (`/send/text`, `/send/reply`, `/send/media`) return a
+stable HTTP status + `{ok:false, error, code, retryable}` body. Match on
+`code` first; treat `retryable` as a hint about whether immediate retry is
+worth it.
+
 | Symptom | Likely cause | Agent action |
 |---------|--------------|--------------|
 | `401` body `Invalid API key` | Wrong `WHATSAPP_API_KEY` | Ask the user for the key again |
 | `401` body `API key required` | Missing auth | Add `x-api-key` header (or `?apiKey=` / JSON `apiKey`) |
-| `503 Client not ready` | WhatsApp client not authenticated yet | Direct the user to scan the QR at `/qr/<api-key>`, then retry |
 | `400 "to" is required` | Missing recipient | Add `to` field |
 | `400 "body" is required` | Empty body on `/send/text` | Provide a non-empty `body` |
 | `404 Message not found` | Wrong numeric id in `/messages/:id/...` | Re-fetch `/incoming-messages` to get a fresh id |
+| `422 {code:"LID_UNRESOLVED", retryable:false}` | Recipient is a LID chat that has never messaged this WhatsApp account | Do not retry. Wait for the recipient to message first, or invite them out-of-band. This is the expected outcome for a cold prospect. |
+| `502 {code:"SEND_NO_MESSAGE", retryable:true}` | `sendMessage` returned no message — session is stale or WA Web rejected the send | Call `POST /warmup` and retry. If the retry still fails, direct the user to re-link the device via `/qr/<api-key>` (WhatsApp → Settings → Linked Devices). |
+| `503 {code:"NOT_READY"}` | Client is not in `READY` state yet | Poll `/status` until `status:"READY"` AND `waContactCount > 0`. If `status:"READY"` but `waContactCount` stays at 0 for >30s, run `POST /warmup`; if still 0, the session is stale — re-link via QR. |
+| `500 {code:"INTERNAL"}` | Unexpected error | Surface the body to the user; check server logs. |
 | Connection refused / DNS error | Wrong `WHATSAPP_API_URL` or container down | Confirm URL with user |
-| Media upload fails after a successful text send | Likely media mimetype not supported by WhatsApp | Re-encode (e.g. `.webp` → `.jpg`) or try a smaller file |
+
+The previous contract returned HTTP 200 with `message: null` whenever
+`sendMessage` silently resolved to no value. That hid real outages behind
+a misleading "ok". Under the current contract, every send failure has a
+distinct status and `code` — match on the code, not the message.
 
 **Always surface the response body to the user when something fails.** Do not swallow errors.
 
